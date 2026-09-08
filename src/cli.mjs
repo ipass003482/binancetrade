@@ -35,7 +35,7 @@ async function doctor(){
   catch{report.checks[name]={ok:false,message:name==='freqtrade'?'Run bootstrap-native.ps1':'Check native Codex installation/login'};}
  }
  report.checks.setup={ok:await exists(join(LOCAL,'api-auth.json'))};
- if(mode==='demo')report.checks.credentials={ok:await exists(join(LOCAL,'credentials.dpapi.json')),note:'Presence only; no secret read by doctor'};
+ if(mode!=='dry-run')report.checks.credentials={ok:await exists(join(LOCAL,'credentials.dpapi.json')),note:'Presence only; no secret read by doctor'};
  try{report.health=await healthStatus(LOCAL,await client(),await loadPolicy(mode));}
  catch(e){report.health={healthy:false,error:safeError(e)};}
  return report;
@@ -64,7 +64,7 @@ async function watch(){
 }
 async function main(){
  switch(command){
- case 'setup':count(0);return out(mode==='demo'?await setupDemo(await loadPolicy(mode)):await setup());
+ case 'setup':count(0);return out(mode!=='dry-run'?await setupDemo(await loadPolicy(mode)):await setup());
  case 'doctor':count(0);return out(await doctor());
  case 'engine':count(0);return startEngine(mode);
  case 'research':count(0);{const r=await saveResearch();return out({mode,file:r.file,coverage:r.snapshot.researchCoverage,errors:r.snapshot.errors});}
@@ -101,9 +101,9 @@ async function main(){
  case 'reconcile':count(0);return out(await reconcile(LOCAL,await client()));
  case 'report':count(0);return out(await buildReport(LOCAL,await client(),mode));
  case 'demo-check':count(0);{
-  if(mode!=='demo')throw new Error('DEMO_MODE_REQUIRED');
+  if(mode==='dry-run')throw new Error('DEMO_MODE_REQUIRED');
   try{
-   const result=execFileSync(PYTHON,[join(ROOT,'scripts/demo-check.py')],{cwd:ROOT,encoding:'utf8',timeout:90000,
+   const result=execFileSync(PYTHON,[join(ROOT,mode==='demo-futures'?'scripts/demo-futures-engine.py':'scripts/demo-check.py'),...(mode==='demo-futures'?['--check']:[])],{cwd:ROOT,encoding:'utf8',timeout:90000,
     windowsHide:true,stdio:['ignore','pipe','pipe']});
    return out(JSON.parse(result));
   }catch(e){
@@ -112,7 +112,7 @@ async function main(){
   }
  }
  case 'help':case undefined:return console.log(
-  'Binance trade | native Windows | dry-run default; --mode demo for Binance Demo spot\n'+
+  'Binance trade | native Windows | dry-run default; --mode demo for spot; --mode demo-futures for isolated perpetuals (max 3x)\n'+
   'setup / doctor / engine       Prepare, inspect, start selected engine\n'+
   'research / analyze <snapshot> Collect evidence or produce a proposal\n'+
   'codex-smoke <snapshot>        Force HOLD to check native CLI integration\n'+

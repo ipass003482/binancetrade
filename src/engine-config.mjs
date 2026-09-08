@@ -1,8 +1,9 @@
+import { isDemo,isFutures } from './mode.mjs';
 export function makeEngineConfig(policy,auth){
- const demo=policy.mode==='demo';
+ const demo=isDemo(policy.mode),futures=isFutures(policy.mode);
  return {
   bot_name:policy.freqtrade.botName,strategy:policy.freqtrade.strategy,dry_run:!demo,...(!demo?{dry_run_wallet:1000}:{}),
-  trading_mode:'spot',margin_mode:'',max_open_trades:policy.maxOpenTrades,
+  trading_mode:futures?'futures':'spot',margin_mode:futures?'isolated':'',...(futures?{liquidation_buffer:0.1}: {}),max_open_trades:policy.maxOpenTrades,
   stake_currency:'USDT',stake_amount:Number(policy.maxStakeUsdt),tradable_balance_ratio:0.99,
   fiat_display_currency:'',timeframe:'15m',cancel_open_orders_on_exit:true,
   initial_state:'running',force_entry_enable:true,position_adjustment_enable:false,

@@ -1,8 +1,9 @@
+param([ValidateSet('demo','demo-futures')][string]$Mode='demo')
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
-$demoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../local/demo'))
+$demoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ('../local/'+$Mode)))
 New-Item -ItemType Directory -Path $demoRoot -Force | Out-Null
-Write-Host 'Enter BINANCE DEMO keys only. These are encrypted for this Windows user.'
+Write-Host ('Enter BINANCE '+$(if ($Mode -eq 'demo-futures') {'USDT FUTURES DEMO'} else {'SPOT DEMO'})+' keys only. These are encrypted for this Windows user.')
 $demoKey = Read-Host 'Demo API Key' -AsSecureString
 $demoSecret = Read-Host 'Demo Secret' -AsSecureString
 $demoPayload = @{ version = 1; key = (ConvertFrom-SecureString $demoKey); secret = (ConvertFrom-SecureString $demoSecret) } | ConvertTo-Json

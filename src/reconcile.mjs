@@ -1,3 +1,4 @@
+import { isEntry,isExit } from './mode.mjs';
 import { join } from 'node:path';
 import { lock,journalRead,journalAppend } from './io.mjs';
 export async function reconcile(local,client){
@@ -9,12 +10,13 @@ export async function reconcile(local,client){
   const all=await client.history(),result=[];
   for(const item of pending){
    const base=records.find(r=>r.id===item.id&&r.status==='pending');
-   if(!base||!['buy','sell'].includes(base.action))throw new Error('JOURNAL_MISSING_INTENT');
-   const matches=all.filter(t=>base.action==='buy'?t.enter_tag===base.tag:t.trade_id===base.tradeId);
+   if(!base||!isEntry(base.action)&&!isExit(base.action))throw new Error('JOURNAL_MISSING_INTENT');
+   const matches=all.filter(t=>isEntry(base.action)?t.enter_tag===base.tag:t.trade_id===base.tradeId);
    const t=matches.length===1?matches[0]:null;
-   const proven=t&&t.pair===base.pair&&(base.action==='buy'
-    ?Number(t.stake_amount)===Number(base.stakeUsdt)
-    :t.is_open===false||t.orders?.some(o=>o.ft_order_side==='sell'&&o.is_open===true));
+   const directionOk=base.action==='buy'||base.action==='sell'||(t&&t.is_short===base.action.endsWith('short'));
+   const proven=t&&directionOk&&t.pair===base.pair&&(isEntry(base.action)
+    ?Number(t.stake_amount)===Number(base.stakeUsdt)&&(base.leverage===undefined||t.leverage===base.leverage)
+    :t.is_open===false||t.orders?.some(o=>o.ft_order_side===(t.is_short?'buy':'sell')&&o.is_open===true));
    if(proven){
     const record={id:base.id,status:'reconciled',action:base.action,tradeId:t.trade_id,at:new Date().toISOString()};
     await journalAppend(file,record);result.push(record);

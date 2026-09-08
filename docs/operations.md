@@ -6,10 +6,11 @@ Freqtrade is the only order/position ledger and owns stoploss/ROI exits.
 OpenAlice, UTA, Docker and system startup services are outside this project.
 
 Default dry-run uses local/ and loopback18080. Explicit --mode demo uses local/demo/
-and loopback18082, a distinct bot/strategy, credentials, SQLite database and journals.
+and loopback18082. Explicit --mode demo-futures uses local/demo-futures/ and loopback18084.
+Each has a distinct bot/strategy, credentials, SQLite database and journals.
 There is no real-money mode. Separate API keys on one exchange account do not isolate funds.
 
-## Demo adapter
+## Spot Demo adapter
 scripts/demo-engine.py is a process-local subclass installed into the Freqtrade resolver;
 installed packages are unchanged. Freqtrade 2026.8 deliberately disables Binance Demo
 in its normal adapter. This project enables it only in this dedicated runner.
@@ -44,7 +45,9 @@ An expired pre-send deadline is recorded rejected, not unknown.
 
 Codex runs with isolated research cwd, read-only sandbox, disabled shell tools and a
 sanitized environment. It receives evidence and position summaries, never broker credentials.
-It proposes one hold/buy/sell. No autonomous strategy-code changes are accepted.
+Spot proposes hold/buy/sell. Demo futures proposes hold/open-long/open-short/close-long/close-short,
+with an integer leverage field (1–3). Closing never opens the opposite side.
+No autonomous strategy-code changes are accepted.
 
 The strategy callback compares the incoming amount against Freqtrade's native float
 stake/rate representation, avoiding false over-limit rejection from reconstructing a
@@ -123,3 +126,41 @@ and uninterrupted long-term operation remain unverified. Local smokes do not dem
 - https://github.com/freqtrade/freqtrade/tree/2026.8
 - https://github.com/binance/binance-spot-api-docs/blob/master/demo-mode/general-info.md
 - https://github.com/binance/binance-skills-hub
+
+## Local Research Desk
+
+`npm run ui` starts a read-only HTTP server on 127.0.0.1:18100. It must run on the same machine as this project's Freqtrade engine; it does not configure remote access. Host/Origin and cross-site checks protect the local surface, static files use an explicit allowlist, and non-GET methods are rejected. No exchange credentials are decrypted by the dashboard.
+
+`/api/dashboard?mode=dry-run|demo|demo-futures` uses FreqtradeClient's identity-checked snapshot/history reads and returns only selected account, position and closed-trade fields, a realized-PnL summary, recent local proposals, safe health status and configuration-file presence. Raw Freqtrade configuration, auth and order objects never reach the UI. Closed history is limited to the newest 50 rows in the presentation; the summary covers the complete verified history read. A history failure preserves the current account with historyError and unavailable history, rather than claiming no trades. No persisted trade cache is used as a current account fallback.
+
+`/api/market` accepts only policy pairs and the three supported modes. Public data is independent of engine availability. Five-second account and fifteen-second market caching coalesce concurrent reads; the frontend polls every thirty seconds and cancels superseded requests.
+
+The connection dialog detects setup and Demo credential-file presence, shows mode-specific local commands, and checks the running engine. Credential-file presence is not credential validity; a matching engine must still connect. UI connection checks never start an engine, run a cycle or place an order. The operator enters Demo keys only through configure-demo.ps1. The UI makes no real-money mode available.
+
+Preview data is frontend-only and explicitly labelled. Price landscape lines are overlapping 21-candle close windows; they are not probability-density estimates. The multidimensional chart normalizes each OHLC/volume column independently. The four-node workflow depicts actual subsystem responsibilities, not a live multi-agent activity feed.
+
+## Analyst style and audit
+
+`config/analyst.json` selects `active` (default) or `conservative` on the next analysis. Review the full style text in `prompts/analyst-active.md` and `prompts/analyst-conservative.md` for spot, or their `analyst-futures-*` counterparts for perpetuals. The host contract in `src/analyst.mjs` adds the allowed mode, fixed stake, risk limits, selected account fields and untrusted market snapshot. The native Codex process remains research-only and returns the existing proposal schema.
+
+Active may propose an entry with a clear price structure and at least one supporting volume or momentum observation, despite secondary disagreement. Conservative asks for stronger agreement. Neither style imposes a trade quota, guarantees performance, changes deterministic bridge checks or permits real-money trading. Missing/invalid required evidence still blocks a trade; optional unavailable Web3 context is not automatically a blocker or positive evidence.
+
+Each analysis records its style, prompt version, snapshot identity, full prompt hash and style-file hash in the research run's `analysis.json`; a cycle also saves `<snapshotId>.analysis.json` beside its snapshot/proposal in the selected mode's runs directory. This is provenance, not an automatic A/B performance report. Invalidation levels written in `reason` are descriptive and do not create execution orders.
+
+Real-money deployment would require a separately reviewed execution boundary, account/credential isolation, reconciliation and recovery acceptance, and explicit operator authorization. Before considering it, evaluate this fixed prompt version on unseen historical/replayed data and forward Demo runs including fees, slippage, drawdown and failed submissions. A more active prompt alone does not establish a profitable strategy. Live mode remains rejected.
+
+## USDT perpetual Demo contract
+
+The `demo-futures` lane uses `scripts/demo-futures-engine.py` and `CodexDemoFutures`. It is separate from the spot adapter and only permits HTTPS `demo-fapi.binance.com/fapi/` in both CCXT and actual requests/aiohttp transports; redirects are disabled. COIN-M, production FAPI, spot, SAPI and WebSocket paths are rejected. Installed Freqtrade/CCXT packages are unchanged. Futures credentials are entered using `configure-demo.ps1 -Mode demo-futures` and encrypted under the distinct mode directory.
+
+Only BTC/USDT:USDT, ETH/USDT:USDT, SOL/USDT:USDT and BNB/USDT:USDT are configured. The host verifies PERPETUAL/TRADING, USDT quote/margin assets and full symbol identity, collects contract candles, mark price and funding rate, and emits `futures:<pair>` evidence. Spot evidence does not authorize a futures entry. Before entry the bridge refreshes the contract quote and filters; short price drift uses bid, long uses ask. Quantity/min-notional checks use the rounded-down amount and both lot-size filters. Exchange constraints remain authoritative.
+
+`stakeUsdt` is collateral margin, not leveraged position value. Margin stays capped at 50 per entry/50 total USDT, leverage is an integer 1–3, and notional stays capped at 150 per entry/150 total. Existing position notional uses the greater of entry margin times leverage and amount times current price. Two open positions, four UTC-day entry attempts (both directions combined), -20 USDT realized-plus-unrealized entry stop, fresh-quote, spread, drift and unresolved-journal guards still apply. One-way isolated positions only: no simultaneous long/short hedge, automatic reversal or averaging down.
+
+The adapter independently checks entry notional/margin and leverage before native order creation; the strategy permits tagged bridge entries in either direction and produces no autonomous entry signals. `close-long` and `close-short` must match the current side and use Freqtrade forceexit by trade ID. Freqtrade handles reduction-only futures exits. Entry stops and daily-loss stops do not block a matching close. An ambiguous short entry remains frozen until a unique tag, pair, margin and leverage/direction are proven; open short exits reconcile against buy-side exit orders.
+
+Stoploss and ROI remain Freqtrade PnL ratios: -2% at 3x is approximately a 0.67% adverse price move before fees/slippage, not a 2% price stop. These are engine-managed exits, with stoploss_on_exchange disabled. The process must remain running; no guaranteed execution price, exchange-side protective stop, or continuity through an outage is claimed. Funding and net PnL remain owned by Freqtrade rather than recomputed from the model's narrative.
+
+Acceptance here: offline Node and Python contract tests, actual sync CCXT orderbooks for all four Demo perpetuals and async candles, actual CLI configuration/runner selection, and read-only dashboard interaction. No stored exchange credentials read, no scheduler, no contract account orders. Destination acceptance must verify a dedicated account's one-way/single-asset settings, existing positions/orders, signed balance, leverage/margin application, long and short fills, reduction-only closes and recovery; do not call exchange-side execution verified until that happens.
+
+Sources: [Binance USD-M API test environment](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/general-info), [Freqtrade leverage semantics](https://www.freqtrade.io/en/stable/leverage/), and the installed Freqtrade 2026.8 source inspected for forceenter/forceexit and adapter contracts.

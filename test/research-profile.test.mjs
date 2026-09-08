@@ -18,7 +18,7 @@ test('Demo collector uses only Demo market URLs and produces closed-candle summa
  const snapshot=await collect(p,{includeWeb3:false,fetchImpl:u=>{hosts.push(new URL(u).hostname);return fetchMock(u);}});
  assert.ok(hosts.every(h=>h==='demo-api.binance.com'));
  assert.equal(snapshot.mode,'demo');
- assert.equal(snapshot.evidence.filter(e=>e.id.startsWith('technical:')).length,2);
+ assert.equal(snapshot.evidence.filter(e=>e.id.startsWith('technical:')).length,p.pairs.length);
  const m=snapshot.markets[0];assert.equal(technicalSummary(m.candles).sma20,'101');
 });
 test('bad or discontinuous OHLCV does not create misleading indicators',()=>{
@@ -46,5 +46,5 @@ test('without mappings do not auto-audit similarly named wrapped tokens',async()
  await collect(p,{profile:{pairs:{}},fetchImpl:fetchMock,queryWeb3:async(skill,command)=>{
   calls.push(command);return {status:'ok',data:[]};
  }});
- assert.deepEqual(calls.sort(),['search','search','token-rank']);
+ assert.deepEqual(calls.sort(),[...p.pairs.map(()=> 'search'),'token-rank']);
 });

@@ -25,3 +25,6 @@ export const ProposalSchema = z.object({
  action:z.enum(['hold','buy','sell']),pair:z.string(),stakeUsdt:z.string().regex(/^\d+(\.\d{1,8})?$/),
  snapshotId:z.string().uuid(),evidenceIds:z.array(z.string()).max(10),reason:z.string().min(1).max(1500)
 }).strict();
+
+export const FuturesProposalSchema=ProposalSchema.extend({action:z.enum(["hold","open-long","open-short","close-long","close-short"]),leverage:z.number().int().min(1).max(3)}).strict();
+export const proposalSchema=policy=>policy.mode==="demo-futures"?FuturesProposalSchema:ProposalSchema;

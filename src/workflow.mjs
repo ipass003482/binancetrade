@@ -16,6 +16,7 @@ export async function runCycle({local,policy,client,signal,collectFn=collect,ana
    await writeJson(join(local,'runs',snapshot.id+'.snapshot.json'),snapshot);
    await healthUpdate(local,{stage:'analyzing',snapshotId:snapshot.id});
    const analysis=await analyzeFn(snapshot,policy,account,{signal});proposal=analysis.proposal;
+   if(analysis.metadata)await writeJson(join(local,'runs',snapshot.id+'.analysis.json'),analysis.metadata);
    await writeJson(join(local,'runs',snapshot.id+'.proposal.json'),proposal);
    if(signal?.aborted)throw new Error('CYCLE_ABORTED');
    await healthUpdate(local,{stage:'executing'});

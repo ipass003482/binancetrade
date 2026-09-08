@@ -1,8 +1,9 @@
 # Binance trade
-Independent Windows-native Binance spot research / dry-run project. No Docker.
+Independent Windows-native Binance spot and isolated USDT perpetual research / Demo project. No Docker.
 Do not read, modify, import configuration from, or connect to OpenAlice / its UTA.
 Reject real-money execution. Demo is allowed only through the guarded project
-adapter, dedicated Demo identity and Demo-only wire destinations. Dry-run stays default.
+adapter, dedicated Demo identity and Demo-only wire destinations. Futures is a distinct demo-futures mode, isolated margin,
+maximum 3x, and the BTC/ETH/SOL/BNB USDT perpetual whitelist. Never route it through spot. Dry-run stays default.
 Demo keys are entered locally and encrypted for the Windows user; never log them
 or expose them to research agents. Do not read stored credentials during development.
 Research agents run in the nested research repository, without trade-control tools.

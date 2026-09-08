@@ -1,3 +1,5 @@
+import { proposalSchema } from './config.mjs';
+import { isDemo,isFutures,isEntry,isExit } from './mode.mjs';
 import { jsonFetch } from './http.mjs';
 export class FreqtradeClient {
  constructor(policy,auth,{fetchImpl=fetch}={}) {this.policy=policy;this.auth=auth;this.fetchImpl=fetchImpl;}
@@ -8,13 +10,13 @@ export class FreqtradeClient {
   });
  }
  async assertMode() {
-  const c=await this.request('show_config'),demo=this.policy.mode==='demo';
+  const c=await this.request('show_config'),demo=isDemo(this.policy.mode),futures=isFutures(this.policy.mode);
   const modeOk=demo
    ? c.dry_run===false && c.runmode==='live' && c.demo_trading===true
    : this.policy.mode==='dry-run' && c.dry_run===true && c.runmode==='dry_run' && c.demo_trading!==true;
-  if(!modeOk || c.trading_mode!=='spot' || c.exchange!=='binance'
+  if(!modeOk || c.trading_mode!==(futures?'futures':'spot')||(futures&&c.margin_mode!=='isolated') || c.exchange!=='binance'
      || c.bot_name!==this.policy.freqtrade.botName || c.strategy!==this.policy.freqtrade.strategy
-     || c.state!=='running' || c.stake_currency!=='USDT' || c.short_allowed!==false
+     || c.state!=='running' || c.stake_currency!=='USDT' || c.short_allowed!==futures
      || c.force_entry_enable!==true || c.position_adjustment_enable!==false
      || !(c.stoploss<0 && c.stoploss>=-0.02) || c.max_open_trades!==this.policy.maxOpenTrades)
    throw new Error('ENGINE_IDENTITY_REJECTED: require matching dedicated '+this.policy.mode+' engine');
@@ -52,11 +54,12 @@ export class FreqtradeClient {
   throw new Error('HISTORY_LIMIT_EXCEEDED');
  }
  async submit(proposal,tag,tradeId,{validUntil=Infinity}={}) {
+  proposalSchema(this.policy).parse(proposal);
   await this.assertMode();
   if(Date.now()>validUntil)throw new Error('ORDER_DEADLINE_EXPIRED');
-  if(proposal.action==='buy') return this.request('forceenter',{pair:proposal.pair,side:'long',
+  if(isEntry(proposal.action)) return this.request('forceenter',{pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',...(isFutures(this.policy.mode)?{leverage:proposal.leverage}:{}),
     ordertype:'market',stakeamount:Number(proposal.stakeUsdt),entry_tag:tag});
-  if(proposal.action==='sell') return this.request('forceexit',{tradeid:tradeId,ordertype:'market'});
+  if(isExit(proposal.action)) return this.request('forceexit',{tradeid:tradeId,ordertype:'market'});
   throw new Error('No execution for HOLD');
  }
 }
