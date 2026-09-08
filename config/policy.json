@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "mode": "dry-run",
+  "pairs": [
+    "BTC/USDT",
+    "ETH/USDT"
+  ],
+  "maxStakeUsdt": "25",
+  "maxExposureUsdt": "50",
+  "maxOpenTrades": 2,
+  "maxDailyLossUsdt": "20",
+  "maxEntriesPerDay": 4,
+  "maxSignalAgeSeconds": 600,
+  "maxSpreadBps": 20,
+  "intervalSeconds": 900,
+  "freqtrade": {
+    "url": "http://127.0.0.1:18080",
+    "botName": "binance-trade-dry",
+    "strategy": "CodexResearchSpot"
+  },
+  "maxPriceMoveBps": 100
+}

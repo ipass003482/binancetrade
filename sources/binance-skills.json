@@ -1,0 +1,60 @@
+{
+  "repository": "https://github.com/binance/binance-skills-hub",
+  "commit": "257d287079cfac7d9a173078fc574e8fd7bbf212",
+  "license": "Selected Web3 skills have no explicit license field or root LICENSE at this commit. Private local use; clarify redistribution rights before publishing.",
+  "patches": [
+    "Portable pathToFileURL direct-execution check in three upstream Node scripts."
+  ],
+  "files": [
+    {
+      "path": "query-token-info/references/cli.md",
+      "upstreamSha256": "e56aa5a797eae2a458ca94d0e86bb7e6cc526a182e4bdc59fe67589b755ad6be",
+      "sha256": "e56aa5a797eae2a458ca94d0e86bb7e6cc526a182e4bdc59fe67589b755ad6be"
+    },
+    {
+      "path": "query-token-info/scripts/cli.mjs",
+      "upstreamSha256": "5632fe6ab01cac77f1bdf670dabf0916fb79510d9a3ebf67b9aceff4b5c762de",
+      "sha256": "11887717af816cde27c1e90ca2acb172a1479117ee2d39f30dad2f030ccb49a5"
+    },
+    {
+      "path": "query-token-info/SKILL.md",
+      "upstreamSha256": "e47e7e749dd0549aad2676d2be4bf1bab523218d0467cbdd3526d41539bb5a89",
+      "sha256": "e47e7e749dd0549aad2676d2be4bf1bab523218d0467cbdd3526d41539bb5a89"
+    },
+    {
+      "path": "query-token-audit/SKILL.md",
+      "upstreamSha256": "a526130068794d80857e27506e68e9a2dc903157144b65e2c0fdea72131d7b28",
+      "sha256": "a526130068794d80857e27506e68e9a2dc903157144b65e2c0fdea72131d7b28"
+    },
+    {
+      "path": "crypto-market-rank/references/cli.md",
+      "upstreamSha256": "a7fcdcd29371d2eb9ea360ce12c125c0a6fc2852d297afa0c7ce87c0e506bee2",
+      "sha256": "a7fcdcd29371d2eb9ea360ce12c125c0a6fc2852d297afa0c7ce87c0e506bee2"
+    },
+    {
+      "path": "crypto-market-rank/scripts/cli.mjs",
+      "upstreamSha256": "0996d722182c1d8f7d9a85dbb19b9113190aca0598beb77b4fb0a39fb9bdd856",
+      "sha256": "9efb475172424f84aff8103a3827f5c77e3489985bdb321666b96beb42d3f314"
+    },
+    {
+      "path": "crypto-market-rank/SKILL.md",
+      "upstreamSha256": "f474cb2c5e775cd410ae9c826329dbb3ebb4533e010fce594fad352b641bc004",
+      "sha256": "f474cb2c5e775cd410ae9c826329dbb3ebb4533e010fce594fad352b641bc004"
+    },
+    {
+      "path": "query-address-info/references/cli.md",
+      "upstreamSha256": "18ef7296e0621ccbc48aa7d8c4cd6476a839009576e70d11357a6f534c94255b",
+      "sha256": "18ef7296e0621ccbc48aa7d8c4cd6476a839009576e70d11357a6f534c94255b"
+    },
+    {
+      "path": "query-address-info/scripts/cli.mjs",
+      "upstreamSha256": "f7c5828dfccefd5f452e11ce28df76d8792bd68fb793e7347821f8ed6150fd7e",
+      "sha256": "e33ea2fc340dc03bee4f5fa50bc5b97636b1d40a70cdce211819ae87f9bbfa3e"
+    },
+    {
+      "path": "query-address-info/SKILL.md",
+      "upstreamSha256": "8cd31e4f965553f32fe847d4ab7a40e950604e9d37104c34b81692c0b9055a5a",
+      "sha256": "8cd31e4f965553f32fe847d4ab7a40e950604e9d37104c34b81692c0b9055a5a"
+    }
+  ]
+}

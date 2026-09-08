@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "pairs": {
+    "BTC/USDT": {
+      "chainTokens": [],
+      "wallets": []
+    },
+    "ETH/USDT": {
+      "chainTokens": [],
+      "wallets": []
+    }
+  },
+  "note": "Only add explicitly verified chainId/contractAddress mappings. Wrapped tokens are proxies, never proof of spot identity."
+}

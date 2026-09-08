@@ -1,0 +1,17 @@
+.cache/
+.runtime/
+.venv/
+node_modules/
+local/
+research/.git/
+research/.codex/
+research/runs/
+*.log
+__pycache__/
+/research/
+
+dist/
+
+.pytest_cache/
+*.pyc
+*.pyo

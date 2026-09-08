@@ -1,0 +1,36 @@
+{
+  "name": "binance-trade",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "setup": "node src/cli.mjs setup",
+    "doctor": "node src/cli.mjs doctor",
+    "research": "node src/cli.mjs research",
+    "analyze": "node src/cli.mjs analyze",
+    "cycle": "node src/cli.mjs cycle",
+    "watch": "node src/cli.mjs watch",
+    "status": "node src/cli.mjs status",
+    "stop": "node src/cli.mjs stop",
+    "resume": "node src/cli.mjs resume",
+    "demo": "node scripts/demo.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "test:python": "node scripts/test-python.mjs",
+    "test:native": "node scripts/smoke-native.mjs --allow-dry-run-orders",
+    "test:research": "node scripts/research-smoke.mjs",
+    "health": "node src/cli.mjs health",
+    "report": "node src/cli.mjs report",
+    "setup:demo": "node src/cli.mjs setup --mode demo",
+    "test:demo-public": ".venv\\Scripts\\python.exe scripts/demo-public.py",
+    "test:demo-account": "node scripts/smoke-demo-account.mjs --allow-demo-orders",
+    "test:credentials": "powershell.exe -NoProfile -File scripts/test-dpapi.ps1"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0",
+    "zod": "4.1.5"
+  }
+}
