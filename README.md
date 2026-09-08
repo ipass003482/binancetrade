@@ -210,7 +210,7 @@ setup 不覆寫既有設定。
 
 ## 安裝與驗證
 
-另一台 Windows 需要 Node.js 22+、Git 和原生 Codex CLI：
+ Windows 需要 Node.js 22+、Git 和原生 Codex CLI：
 
 ~~~powershell
 npm.cmd ci --ignore-scripts
