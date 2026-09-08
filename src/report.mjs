@@ -33,7 +33,7 @@ export function decisionRows(proposals,records,trades){
  const latest=new Map(records.map(r=>[r.id,r]));
  return proposals.map(p=>{
   const id=createHash('sha256').update(p.snapshotId).digest('hex').slice(0,32),entry=latest.get(id);
-  const matched=trades.filter(t=>t.enter_tag==='codex-'+id || (p.action==='sell'&&entry?.tradeId===t.trade_id));
+  const matched=trades.filter(t=>t.enter_tag==='codex-'+id || (['sell','close-long','close-short'].includes(p.action)&&entry?.tradeId===t.trade_id));
   return {snapshotId:p.snapshotId,action:p.action,pair:p.pair,reason:p.reason,
    evidenceIds:p.evidenceIds,submission:entry?.status??'not_submitted',tradeIds:matched.map(t=>t.trade_id),
    outcomes:matched.map(t=>({tradeId:t.trade_id,isOpen:t.is_open,netRealizedUsdt:t.is_open?null:t.profit_abs,

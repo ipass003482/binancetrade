@@ -3,9 +3,11 @@
   "mode": "dry-run",
   "pairs": [
     "BTC/USDT",
-    "ETH/USDT"
+    "ETH/USDT",
+    "SOL/USDT",
+    "BNB/USDT"
   ],
-  "maxStakeUsdt": "25",
+  "maxStakeUsdt": "50",
   "maxExposureUsdt": "50",
   "maxOpenTrades": 2,
   "maxDailyLossUsdt": "20",

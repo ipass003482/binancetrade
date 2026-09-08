@@ -27,7 +27,10 @@
     "setup:demo": "node src/cli.mjs setup --mode demo",
     "test:demo-public": ".venv\\Scripts\\python.exe scripts/demo-public.py",
     "test:demo-account": "node scripts/smoke-demo-account.mjs --allow-demo-orders",
-    "test:credentials": "powershell.exe -NoProfile -File scripts/test-dpapi.ps1"
+    "test:credentials": "powershell.exe -NoProfile -File scripts/test-dpapi.ps1",
+    "ui": "node src/dashboard.mjs",
+    "setup:demo-futures": "node src/cli.mjs setup --mode demo-futures",
+    "test:demo-futures-public": ".venv\\Scripts\\python.exe scripts/demo-futures-public.py"
   },
   "dependencies": {
     "decimal.js": "10.6.0",

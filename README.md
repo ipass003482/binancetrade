@@ -1,19 +1,41 @@
 # Binance trade
 
-獨立的 Windows 原生 Binance 現貨研究與模擬交易專案。
+獨立的 Windows 原生 Binance 現貨與 USDT 永續合約研究、模擬交易專案。
 Codex CLI 負責分析；程式風控決定能否送單；Freqtrade 管理訂單、持倉與退出。
 不使用 Docker，不連接 OpenAlice／UTA，不支援真實資金交易。
 
-## 兩種模式
+## 介面預覽
 
-| | 本機模擬（預設） | 幣安 Demo |
-|---|---|---|
-| 指令 | 不加模式參數 | 加上 `--mode demo` |
-| 成交位置 | Freqtrade 本機模擬 | 幣安 Demo 的虛擬資金帳戶 |
-| 行情 | Binance 公開現貨 | Binance Demo 現貨 |
-| 金鑰 | 不需要 | Demo 專用 Key／Secret |
-| 本機 API | 127.0.0.1:18080 | 127.0.0.1:18082 |
-| 資料目錄 | local/ | local/demo/ |
+以下為程式實際介面的 **Demo 展示模式截圖**，使用固定範例資料；畫面中的餘額、損益與提案不代表實際帳戶或策略績效。
+
+### 研究總覽
+
+在同一頁查看行情、Codex 提案、保證金使用情況與研究到執行的流程。
+
+![Demo 研究總覽：行情、決策動態、價格地形與保證金摘要](docs/screenshots/demo-overview.png)
+
+### 合約持倉
+
+顯示每筆部位的多空方向、槓桿、保證金與浮動損益。圖中的兩筆 25 USDT 為固定示例；目前單筆保證金上限為 **50 USDT**，最高 **3 倍槓桿**。
+
+![Demo 合約持倉：BTC 多單與 ETH 空單的 3 倍槓桿示例](docs/screenshots/demo-positions.png)
+
+### Demo 連線設定
+
+選擇現貨或永續合約環境，依序完成本機設定、Demo 金鑰輸入與引擎啟動。畫面不接收金鑰；「檢查連線」只讀取狀態，不會下單。圖中為展示流程，並非帳戶已連線的證明。
+
+![Demo 永續合約連線設定：本機設定、金鑰、引擎與唯讀連線檢查](docs/screenshots/demo-connection.png)
+
+## 三種模式
+
+| | 本機模擬（預設） | Demo 現貨 | Demo USDT 永續合約 |
+|---|---|---|---|
+| 模式參數 | 不加參數 | `--mode demo` | `--mode demo-futures` |
+| 成交位置 | Freqtrade 本機模擬 | 幣安 Demo 虛擬帳戶 | 幣安 Futures Demo 虛擬帳戶 |
+| 方向／槓桿 | 現貨多單／1 倍 | 現貨多單／1 倍 | 多空／逐倉／1–3 倍 |
+| 金鑰 | 不需要 | 現貨 Demo 專用 | 合約 Demo 專用 |
+| 本機 API | 127.0.0.1:18080 | 127.0.0.1:18082 | 127.0.0.1:18084 |
+| 資料目錄 | local/ | local/demo/ | local/demo-futures/ |
 
 每個模式的認證、資料庫、訂單紀錄、停止標記和報表都分開。
 本機模擬與 Demo 都不是策略獲利證明。Demo 也不是 Spot Testnet。
@@ -171,14 +193,15 @@ report 產出 Markdown 與 JSON，印出可開啟的路徑，內容包括：
 
 | 項目 | 預設 |
 |---|---|
-| 商品 | BTC/USDT、ETH/USDT |
-| 單筆／總投入上限 | 25／50 USDT |
+| 商品 | BTC、ETH、SOL、BNB；現貨以 USDT 計價，合約為 USDT 永續 |
+| 單筆／總投入上限 | 50／50 USDT；合約指保證金 |
+| 合約槓桿／名義倉位 | 逐倉 1–3 倍；單筆 150、合計 150 USDT 上限 |
 | 同時持倉 | 2 |
 | 每 UTC 日開倉嘗試上限 | 4 |
 | 每日損失開倉門檻 | 已實現當日損益＋目前未實現損益 ≤ -20 USDT |
 | 訊號有效期／送單前報價有效期 | 600／15 秒 |
 | 最大價差／價格偏移 | 20／100 bps |
-| 策略止損 | -2%，不保證成交價 |
+| 策略止損 | -2% PnL；合約以槓桿後損益計，不是價格跌幅；不保證成交價 |
 | ROI 退出 | 初始 3%，120 分鐘後 1.5%，360 分鐘後 0.5% |
 
 本機模擬起始餘額為 1,000 USDT；Demo 使用幣安 Demo 帳戶的虛擬餘額。
@@ -204,6 +227,7 @@ npm.cmd run test:python
 npm.cmd run test:credentials
 npm.cmd run test:research
 npm.cmd run test:demo-public
+npm.cmd run test:demo-futures-public
 npm.cmd run test:native
 ~~~
 
@@ -215,3 +239,34 @@ test:demo-public 不需要金鑰、不下單；test:demo-account 才會送出虛
 部分授權資訊尚不完整；上游下載的技能內容不納入本 repository，
 由 setup 在本機取得。Repository：https://github.com/ipass003482/binancetrade。
 另一台電腦的 clone 與啟動步驟見 [START-HERE.md](START-HERE.md)。
+
+## 圖形控制台
+
+執行 `npm run ui`，開啟 http://127.0.0.1:18100 。Research Desk 是白色現代量化研究介面，提供行情回看、價格地形、多維行情、研究流程，以及帳戶、持倉、交易與提案紀錄。
+
+右上角「連接工作區」可選擇 Dry-run／Binance Demo，查看本機設定與金鑰檔是否存在、對應啟動指令，以及引擎和資料讀取狀態。先依本文件完成 Node/Freqtrade 安裝，於同一台電腦執行 UI 與引擎。Demo 金鑰由本機 PowerShell 流程輸入並加密，網頁不接收金鑰。
+
+「檢查連線」只驗證本地引擎並讀取資料；UI 不會啟動引擎、排程或送單。交易週期仍以 `node src/cli.mjs cycle`（Demo 加上 `--mode demo`）啟動。通過風控的週期可能送出所選模擬環境訂單。
+
+帳戶及當前持倉來自已通過身分檢查的 Freqtrade。交易紀錄顯示最近 50 筆已平倉交易；歷史讀取失敗時保留本次帳戶資料，明確標示交易紀錄不可用。引擎離線時不會以舊快取充當目前持倉。
+
+「展示模式」或 http://127.0.0.1:18100/?preview=1 使用清楚標示的固定範例，並非帳戶績效。圖表每 30 秒更新，可手動刷新；行情地形呈現歷史價格，不是機率預測，多維圖各欄獨立正規化。Ctrl+C 關閉 UI 服務。
+
+Analyst style: `config/analyst.json` now defaults to `active`. The editable spot instructions are in [prompts/analyst-active.md](prompts/analyst-active.md), and perpetual instructions in [prompts/analyst-futures-active.md](prompts/analyst-futures-active.md); choose `conservative` for stronger confirmation requirements. Both use identical trade limits and remain dry-run/Demo only. See [analyst style and audit](docs/operations.md#analyst-style-and-audit) for provenance and evaluation limits.
+
+## Demo 合約啟動
+
+只使用 Binance USDT Futures Demo 金鑰。帳戶需為 One-way（單向持倉）、Single-Asset 模式；使用專用 Demo 帳戶。這個專案使用逐倉，不會自動切換帳戶的全域設定。
+
+~~~powershell
+node src/cli.mjs setup --mode demo-futures
+powershell.exe -NoProfile -File scripts/configure-demo.ps1 -Mode demo-futures
+node src/cli.mjs demo-check --mode demo-futures
+node src/cli.mjs engine --mode demo-futures
+~~~
+
+先確認唯讀 demo-check 成功，且沒有其他程式管理的持倉／訂單。保持引擎終端開啟，在另一個終端執行 `node src/cli.mjs cycle --mode demo-futures` 才會進行一次研究與可能的 Demo 交易；不會自動啟動排程。報表使用 `node src/cli.mjs report --mode demo-futures`。
+
+UI 的「連接工作區 → 查看環境」可選 Demo 永續合約；BTC、ETH、SOL、BNB 的合約識別如 `BTC/USDT:USDT`，持倉顯示多空及槓桿。單筆 50 USDT 保證金，3 倍最多 150 USDT 名義金額；數量依交易所精度向下取整，低於最小金額時拒絕下單，不自動增加保證金。
+
+本次已驗證離線風控與 native adapter 契約、真實公開 Demo 合約行情；未讀取金鑰，也未完成合約帳戶的真實 Demo 成交驗收。詳見 [合約計畫](plans/demo-futures.md)。

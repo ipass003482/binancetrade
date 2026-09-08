@@ -5,7 +5,7 @@ import { validatePolicy } from '../src/config.mjs';
 import { fixture,trade } from './fixtures.mjs';
 test('accepts bounded simulated buy, checks decimals at boundary',async()=>{
  const f=await fixture();assert.equal(assess(f).action,'buy');
- f.proposal.stakeUsdt='25.00000001';assert.throws(()=>assess(f),/STAKE_LIMIT/);
+ f.proposal.stakeUsdt='50.00000001';assert.throws(()=>assess(f),/STAKE_LIMIT/);
 });
 for(const [name,mutate,pattern] of [
  ['live config',f=>{f.policy.mode='live';},/Invalid/],

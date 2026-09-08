@@ -6,28 +6,33 @@ import { RESEARCH } from './paths.mjs';
 import { jsonFetch } from './http.mjs';
 import { loadResearchProfile,technicalSummary,compactEvidence } from './research-profile.mjs';
 import { safeError } from './health.mjs';
+import { MODES,isFutures } from './mode.mjs';
 const PUBLIC='https://data-api.binance.vision';
 export async function market(pair,{fetchImpl=fetch,mode='dry-run'}={}) {
- if(!['dry-run','demo'].includes(mode))throw new Error('MARKET_MODE_REJECTED');
- const base=mode==='demo'?'https://demo-api.binance.com':PUBLIC;
+ if(!MODES.includes(mode))throw new Error('MARKET_MODE_REJECTED');
+ const futures=isFutures(mode),base=futures?'https://demo-fapi.binance.com':mode==='demo'?'https://demo-api.binance.com':PUBLIC;
+ const prefix=futures?'/fapi/v1':'/api/v3';
  let quoteFetchedAt;
- if(!/^[A-Z0-9]+\/USDT$/.test(pair)) throw new Error('Invalid spot pair');
- const symbol=pair.replace('/',''), query='?symbol='+symbol;
+ if(!(futures?/^[A-Z0-9]+\/USDT:USDT$/:/^[A-Z0-9]+\/USDT$/).test(pair)) throw new Error('INVALID_MARKET_PAIR');
+ const symbol=pair.split(':')[0].replace('/',''), query='?symbol='+symbol;
  const [info,book,bars]=await Promise.all([
-  jsonFetch(base+'/api/v3/exchangeInfo'+query,{fetchImpl}),
-  jsonFetch(base+'/api/v3/ticker/bookTicker'+query,{fetchImpl}).then(value=>{quoteFetchedAt=new Date().toISOString();return value;}),
-  jsonFetch(base+'/api/v3/klines'+query+'&interval=15m&limit=33',{fetchImpl})
+  jsonFetch(base+prefix+'/exchangeInfo'+(futures?'':query),{fetchImpl}),
+  jsonFetch(base+prefix+'/ticker/bookTicker'+query,{fetchImpl}).then(value=>{quoteFetchedAt=new Date().toISOString();return value;}),
+  jsonFetch(base+prefix+'/klines'+query+'&interval=15m&limit=33',{fetchImpl})
  ]);
  const instrument=info.symbols?.find(s=>s.symbol===symbol);
- if(!instrument || instrument.status!=='TRADING' || instrument.baseAsset+'/'+instrument.quoteAsset!==pair
-    || instrument.isSpotTradingAllowed!==true) throw new Error('NOT_A_VERIFIED_SPOT_PAIR');
+ if(!instrument || instrument.status!=='TRADING' || instrument.baseAsset+'/'+instrument.quoteAsset!==pair.split(':')[0]
+    || (futures?(instrument.contractType!=='PERPETUAL'||instrument.marginAsset!=='USDT'):instrument.isSpotTradingAllowed!==true))
+    throw new Error(futures?'NOT_A_VERIFIED_USDT_PERPETUAL':'NOT_A_VERIFIED_SPOT_PAIR');
  if(book.symbol!==symbol)throw new Error('QUOTE_SYMBOL_MISMATCH');
  const bid=new Decimal(book.bidPrice), ask=new Decimal(book.askPrice);
  if(!bid.isFinite() || !ask.isFinite() || bid.lte(0) || ask.lt(bid)) throw new Error('Invalid quote');
  const now=Date.now();
  const closed=bars.filter(b=>Array.isArray(b) && b[6]<now).slice(-32);
  if(closed.length<20 || now-closed.at(-1)[6]>1800000) throw new Error('Insufficient or stale candles');
- return {pair,verifiedSpot:true,bid:bid.toFixed(),ask:ask.toFixed(),
+ const funding=futures?await jsonFetch(base+prefix+'/premiumIndex'+query,{fetchImpl}):null;
+ if(futures&&(funding.symbol!==symbol||typeof funding.lastFundingRate!=='string'||funding.lastFundingRate.trim()===''||!Number.isFinite(Number(funding.lastFundingRate))||!Number.isFinite(Number(funding.markPrice))||!(Number(funding.markPrice)>0)))throw new Error('INVALID_FUNDING_MARK');
+ return {pair,...(futures?{verifiedFutures:true,contractType:'PERPETUAL',marginAsset:'USDT',filters:instrument.filters,markPrice:funding.markPrice,fundingRate:funding.lastFundingRate,nextFundingTime:funding.nextFundingTime}:{verifiedSpot:true}),bid:bid.toFixed(),ask:ask.toFixed(),
   spreadBps:ask.minus(bid).div(bid).mul(10000).toNumber(),
   candles:closed.map(b=>({openTime:b[0],open:b[1],high:b[2],low:b[3],close:b[4],volume:b[5],closeTime:b[6]})),
   source:base,mode,fetchedAt:quoteFetchedAt,quoteAsOf:null,
@@ -67,7 +72,7 @@ export async function collect(policy,{fetchImpl=fetch,includeWeb3=true,profile,q
  snapshot.markets=await Promise.all(policy.pairs.map(pair=>market(pair,{fetchImpl,mode:policy.mode})));
  for(const m of snapshot.markets){
   const technical=technicalSummary(m.candles);
-  snapshot.evidence.push({id:'spot:'+m.pair,status:'ok',source:m.source,fetchedAt:m.fetchedAt,data:m});
+  snapshot.evidence.push({id:(isFutures(policy.mode)?'futures:':'spot:')+m.pair,status:'ok',source:m.source,fetchedAt:m.fetchedAt,data:m});
   snapshot.evidence.push({id:'technical:'+m.pair,pair:m.pair,status:'ok',source:m.source,
    fetchedAt:m.fetchedAt,data:technical});
  }
