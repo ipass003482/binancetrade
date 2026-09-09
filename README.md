@@ -61,9 +61,54 @@ node src/cli.mjs report
 cycle 執行一輪研究、Codex 分析與風控；HOLD／觀望是正常結果。
 Codex 使用本機既有登入。若需要登入，請在自己的終端執行 codex login。
 
+## 申請幣安 Demo 帳戶與 API 金鑰
+
+第一次使用請依序完成「開通 Demo → 建立 API → 本機輸入 → 唯讀檢查」。只跑預設本機模擬的人可以跳過。
+
+### 1. 開通 Demo Trading
+
+1. 開啟 [Binance Demo Trading 官方網站](https://demo.binance.com/)，登入幣安帳戶；沒有帳戶時先依官網流程註冊。
+2. 點選 **Start Demo Trading／開始模擬交易**；若顯示 **Create／建立**，依畫面啟用 Demo。
+3. 在 Demo 的 **Assets／資產** 查看現貨或合約虛擬餘額。這裡使用虛擬資金，不需要為本專案充值真實 USDT。
+
+官網也可從「Trade／交易 → Demo Trading」進入。Demo 是否開放依帳戶資格與所在地區而定；官方說明未完成 KYC 或未開通正式合約帳戶的使用者也可能符合資格，仍以當下頁面為準。[幣安官方 Demo 教學（附圖）](https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd)
+
+### 2. 建立 Demo API Key／Secret
+
+1. 保持在 Demo 環境，點右上角帳戶圖示 → **API Management／API 管理**，或直接開啟 [Demo API 管理](https://demo.binance.com/en/my/settings/api-management)；登入後確認回到 **demo.binance.com**。
+2. 點 **Create API／建立 API**，輸入方便辨識的名稱，例如 `binancetrade-demo-spot` 或 `binancetrade-demo-futures`，依畫面完成驗證。[官方 Futures Demo API 步驟](https://www.binance.com/en/support/faq/detail/ab78f9a1b8824cf0a106b4229c76496d)
+3. 若頁面要求選擇金鑰類型，選 **System-generated／系統產生（HMAC）**。本專案的輸入流程需要 **API Key + Secret Key**，不支援把 RSA／Ed25519 私鑰貼入 Secret 欄位。類型差異見 [官方 API 金鑰說明](https://www.binance.com/en/support/faq/detail/360002502072)；該篇的一般實盤開戶／入金流程不適用於本專案的 Demo 教學。
+4. 將 Key 與 Secret 保留在自己的安全位置，接著依下方指令輸入本機；不要貼進聊天、README、GitHub 或截圖。若頁面不再提供 Secret，重新建立一組 Demo 金鑰。
+
+**環境與權限：** 本專案需要讀取帳戶／訂單及所選市場的 Demo 交易權限，不需要提領或資金轉帳權限。若 Demo 頁面提供權限或 IP 限制選項，依所選市場與執行電腦的對外 IP 設定；不假設它與正式 API 頁面有相同勾選框。不要使用正式帳戶 API 或 [Spot Testnet](https://testnet.binance.vision/) 的金鑰；Spot Testnet 與本專案的 Spot Demo 是不同環境。[官方 Spot Demo API 說明](https://github.com/binance/binance-spot-api-docs/blob/master/demo-mode/general-info.md)
+
+### 3. 選擇市場，輸入本機並檢查
+
+先完成下方 [安裝與驗證](#安裝與驗證)，再選一個流程：
+
+| 要使用的市場 | 本專案模式 | 下一步 |
+|---|---|---|
+| 現貨 Demo | `--mode demo` | [現貨設定與啟動指令](#接幣安-demo-現貨) |
+| USDT 永續合約 Demo | `--mode demo-futures` | [合約設定與啟動指令](#demo-合約啟動) |
+
+`configure-demo.ps1` 會分別提示 **Demo API Key** 與 **Demo Secret**；輸入時不顯示明文。按 Enter 完成後，金鑰使用 Windows DPAPI 加密保存。現貨與合約的本機金鑰檔分開；為方便管理，可各建立一組有清楚名稱的 Demo Key，但不同 Key 不會隔離同帳戶的資金。
+
+先執行對應模式的 `demo-check`，確認成功與帳戶資訊後再啟動引擎。這個檢查不下單；檢查成功也不代表已完成成交驗收。合約另需 **One-way／單向持倉** 與 **Single-Asset／單資產** 模式，本專案使用逐倉。
+
+### 4. 常見問題
+
+| 狀況 | 檢查方式 |
+|---|---|
+| 找不到 Demo／無法開通 | 確認已登入並符合官網地區與帳戶資格；入口失效時從官網「交易 → Demo Trading」重新進入。 |
+| API 無效或權限不足 | 確認在 Demo 建立、Key／Secret 配對且沒有多餘空白，並核對所選市場、權限與 IP 限制。修正後重新執行該模式的金鑰輸入與唯讀檢查。 |
+| 換電腦後無法解密 | 在新電腦以自己的 Windows 使用者重新輸入，不要直接複製舊的加密金鑰檔。 |
+| Demo 虛擬餘額不足 | Demo「資產」提供現貨／合約各自的 Reset／重設入口；有掛單時需先取消。對本專案，先暫停新開倉、確認持倉已平且無掛單，再停止引擎並安排重設，避免本機交易紀錄與帳戶狀態不一致。[官方重設說明](https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd) |
+
+以上申請流程依官方文件於 **2026-09-08** 核對；按鈕文字可能隨語言與版本變動。
+
 ## 接幣安 Demo 現貨
 
-1. 在幣安 Demo Trading 的 API 管理建立 **Demo 專用** Key／Secret。
+1. 先依上方 [申請教學](#申請幣安-demo-帳戶與-api-金鑰) 建立 Demo Key／Secret。
 2. 執行以下指令，在本機提示中輸入金鑰；不要貼到聊天。
 3. 先跑唯讀帳戶檢查，確認連線與權限，再啟動 Demo 引擎。
 
@@ -256,7 +301,7 @@ Analyst style: `config/analyst.json` now defaults to `active`. The editable spot
 
 ## Demo 合約啟動
 
-只使用 Binance USDT Futures Demo 金鑰。帳戶需為 One-way（單向持倉）、Single-Asset 模式；使用專用 Demo 帳戶。這個專案使用逐倉，不會自動切換帳戶的全域設定。
+先依 [申請教學](#申請幣安-demo-帳戶與-api-金鑰) 取得可用於 Binance USDT Futures Demo 的金鑰。帳戶需為 One-way（單向持倉）、Single-Asset 模式；使用專用 Demo 帳戶。這個專案使用逐倉，不會自動切換帳戶的全域設定。
 
 ~~~powershell
 node src/cli.mjs setup --mode demo-futures
