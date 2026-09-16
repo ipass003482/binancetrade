@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { proposalSchema } from './config.mjs';
 import { isFutures,isEntry,isExit } from './mode.mjs';
+import { dailyEntryAllowance } from './entry-wait.mjs';
 function dec(v,label) {
  if(typeof v!=='number' && typeof v!=='string') throw new Error('Invalid '+label);
  let d; try {d=new Decimal(v);} catch {throw new Error('Invalid '+label);}
@@ -36,6 +37,15 @@ export function assess({proposal,snapshot,account,policy,records,stopped,executi
  }
  if(futures&&trades.some(t=>t.leverage>3))throw new Error('EXISTING_LEVERAGE_LIMIT');
  if(stopped) throw new Error('ENTRY_STOPPED');
+ // Freqtrade can leave total_profit_abs at zero when fetching a current
+ // position price fails. Zero alone does not prove that its PnL is known.
+ // Exits above deliberately remain available without a usable mark.
+ for(const t of trades) {
+  try {
+   if(dec(t.current_rate,'position mark').lte(0))throw new Error();
+   dec(t.profit_abs,'current position pnl');
+  }catch {throw new Error('POSITION_MARK_UNAVAILABLE');}
+ }
  const quote=snapshot.markets.find(m=>m.pair===p.pair);
  if(futures&&(quote?.source!=='https://demo-fapi.binance.com'||executionQuote?.source!=='https://demo-fapi.binance.com'||quote?.mode!==policy.mode||executionQuote?.mode!==policy.mode))throw new Error('FUTURES_DEMO_QUOTE_REQUIRED');
  if(policy.mode==='demo'&&(quote?.source!=='https://demo-api.binance.com'||executionQuote?.source!=='https://demo-api.binance.com'
@@ -78,7 +88,7 @@ export function assess({proposal,snapshot,account,policy,records,stopped,executi
  if(account.daily?.stake_currency!=='USDT'||!daily) throw new Error('DAILY_STATE_UNAVAILABLE');
  const pnl=trades.reduce((sum,t)=>sum.plus(dec(t.total_profit_abs,'unrealized pnl')),dec(daily.abs_profit,'daily pnl'));
  if(pnl.lte(new Decimal(policy.maxDailyLossUsdt).negated())) throw new Error('DAILY_LOSS_LIMIT');
- const entries=records.filter(r=>r.status==='pending'&&isEntry(r.action)&&r.at.startsWith(today));
- if(entries.length>=policy.maxEntriesPerDay) throw new Error('ENTRY_RATE_LIMIT');
+  const allowance=dailyEntryAllowance(records,policy,now);
+  if(!allowance.unlimited&&allowance.remaining===0) throw new Error('ENTRY_RATE_LIMIT');
  return {action:p.action,stakeUsdt:stake.toFixed(),...(futures?{leverage:p.leverage}:{})};
 }

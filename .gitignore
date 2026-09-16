@@ -1,6 +1,7 @@
 .cache/
 .runtime/
 .venv/
+.venv-model/
 node_modules/
 local/
 research/.git/

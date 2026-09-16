@@ -8,6 +8,11 @@ export const PolicySchema = z.object({
  version:z.literal(1),mode:z.literal('dry-run'),
  pairs:z.array(z.string().regex(/^[A-Z0-9]+\/USDT$/)).min(1).max(10),
  maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(10),
+ demoSpot:z.object({pairs:z.array(z.string().regex(/^[A-Z0-9]+\/USDT$/)).min(1).max(10).optional(),maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(10),
+  maxEntriesPerDay:z.number().int().min(0).max(100),maxDailyLossUsdt:money}).strict().optional(),
+ demoFutures:z.object({maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(2),
+  maxNotionalUsdt:money,maxTotalNotionalUsdt:money,maxLeverage:z.number().int().min(1).max(3),
+  maxDailyLossUsdt:money,maxEntriesPerDay:z.number().int().min(0).max(100)}).strict().optional(),
  maxDailyLossUsdt:money,maxEntriesPerDay:z.number().int().min(1).max(100),
  maxSignalAgeSeconds:z.number().int().min(30).max(900),
  maxSpreadBps:z.number().positive().max(100),maxPriceMoveBps:z.number().positive().max(500),intervalSeconds:z.number().int().min(60).max(86400),
@@ -18,6 +23,7 @@ export function validatePolicy(input) {
  if(u.protocol!=='http:' || u.hostname!=='127.0.0.1' || u.username || u.password || u.pathname!=='/' || u.search || u.hash)
    throw new Error('Freqtrade must be a dedicated loopback HTTP endpoint');
  if(new Set(p.pairs).size!==p.pairs.length) throw new Error('Duplicate pair');
+ if(p.demoSpot?.pairs&&new Set(p.demoSpot.pairs).size!==p.demoSpot.pairs.length)throw new Error('Duplicate Demo pair');
  return p;
 }
 export async function loadPolicy(mode='dry-run') { return modePolicy(validatePolicy(await readJson(join(ROOT,'config/policy.json'))),mode); }

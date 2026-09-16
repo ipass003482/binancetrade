@@ -7,6 +7,8 @@ import { RESEARCH } from './paths.mjs';
 import { writeJson } from './io.mjs';
 import { proposalSchema } from './config.mjs';
 import { buildAnalystPrompt } from './analyst.mjs';
+export const RESEARCH_MODEL='gpt-5.6-sol';
+export function modelArgs(){return ['--model',RESEARCH_MODEL];}
 export function safeEnv(input=process.env) {
  const allow=new Set(['PATH','PATHEXT','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','USERPROFILE','HOME','APPDATA','LOCALAPPDATA','CODEX_HOME']);
  return Object.fromEntries(Object.entries(input).filter(([k])=>allow.has(k.toUpperCase())));
@@ -16,9 +18,10 @@ export async function analyze(snapshot,policy,account={trades:[]},{timeoutMs=180
  const schema=join(runDir,'schema.json'), output=join(runDir,'proposal.json');
  await writeJson(schema,z.toJSONSchema(proposalSchema(policy)));
  const {prompt,metadata}=await buildAnalystPrompt({snapshot,policy,account,forceHold});
+ metadata.requestedModel=RESEARCH_MODEL;
  await writeJson(join(runDir,'analysis.json'),metadata);
  const executable=process.platform==='win32'?'codex.exe':'codex';
- const args=['exec','--cd',RESEARCH,'--sandbox','read-only','--ignore-user-config','--ephemeral',
+ const args=['exec',...modelArgs(),'--cd',RESEARCH,'--sandbox','read-only','--ignore-user-config','--ephemeral',
   '-c','features.shell_tool=false','-c','features.unified_exec=false',
   '--output-schema',schema,'--output-last-message',output,'-'];
  await new Promise((resolve,reject)=>{

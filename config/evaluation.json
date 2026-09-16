@@ -1,0 +1,6 @@
+{
+  "minClosedTrades": 100,
+  "minCalendarDays": 30,
+  "minProfitFactor": 1.2,
+  "extraExecutionCostBpsPerSide": 5
+}

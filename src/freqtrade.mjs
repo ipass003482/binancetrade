@@ -1,3 +1,4 @@
+import { tradingTimeframe } from './timeframe.mjs';
 import { proposalSchema } from './config.mjs';
 import { isDemo,isFutures,isEntry,isExit } from './mode.mjs';
 import { jsonFetch } from './http.mjs';
@@ -14,7 +15,7 @@ export class FreqtradeClient {
   const modeOk=demo
    ? c.dry_run===false && c.runmode==='live' && c.demo_trading===true
    : this.policy.mode==='dry-run' && c.dry_run===true && c.runmode==='dry_run' && c.demo_trading!==true;
-  if(!modeOk || c.trading_mode!==(futures?'futures':'spot')||(futures&&c.margin_mode!=='isolated') || c.exchange!=='binance'
+  if(!modeOk || c.timeframe!==tradingTimeframe(this.policy.mode) || c.trading_mode!==(futures?'futures':'spot')||(futures&&c.margin_mode!=='isolated') || c.exchange!=='binance'
      || c.bot_name!==this.policy.freqtrade.botName || c.strategy!==this.policy.freqtrade.strategy
      || c.state!=='running' || c.stake_currency!=='USDT' || c.short_allowed!==futures
      || c.force_entry_enable!==true || c.position_adjustment_enable!==false
@@ -53,10 +54,15 @@ export class FreqtradeClient {
   }
   throw new Error('HISTORY_LIMIT_EXCEEDED');
  }
- async submit(proposal,tag,tradeId,{validUntil=Infinity}={}) {
-  proposalSchema(this.policy).parse(proposal);
-  await this.assertMode();
-  if(Date.now()>validUntil)throw new Error('ORDER_DEADLINE_EXPIRED');
+ async submit(proposal,tag,tradeId,{validUntil=Infinity,beforeSend}={}) {
+  try{
+   proposalSchema(this.policy).parse(proposal);
+   const engine=await this.assertMode();
+   const finalCheck=beforeSend?await beforeSend(engine):null;
+   // Guard work can take time. Recheck after every asynchronous preflight.
+   if(Date.now()>validUntil)throw new Error('ORDER_DEADLINE_EXPIRED');
+   if(finalCheck)finalCheck();
+  }catch(error){error.submissionStarted=false;throw error;}
   if(isEntry(proposal.action)) return this.request('forceenter',{pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',...(isFutures(this.policy.mode)?{leverage:proposal.leverage}:{}),
     ordertype:'market',stakeamount:Number(proposal.stakeUsdt),entry_tag:tag});
   if(isExit(proposal.action)) return this.request('forceexit',{tradeid:tradeId,ordertype:'market'});

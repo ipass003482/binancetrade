@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { LOCAL } from './paths.mjs';
+import { tradingTimeframe } from './timeframe.mjs';
 export const MODES=['dry-run','demo','demo-futures'];
 export const isDemo=mode=>mode==='demo'||mode==='demo-futures';
 export const isFutures=mode=>mode==='demo-futures';
@@ -15,7 +16,8 @@ export function modeLocal(mode){if(!MODES.includes(mode))throw new Error('MODE_R
 export function modePolicy(policy,mode){
  if(!MODES.includes(mode))throw new Error('MODE_REJECTED');
  const futures=isFutures(mode);
- return {...policy,mode,...(futures?{pairs:policy.pairs.map(p=>p+':USDT'),leverage:3,marginMode:'isolated',
-  maxNotionalUsdt:'150',maxTotalNotionalUsdt:'150'}:{}),freqtrade:{...policy.freqtrade,
+ const spotOverride=mode==='demo'?(policy.demoSpot||{}):{};
+ return {...policy,...spotOverride,mode,timeframe:tradingTimeframe(mode),...(isDemo(mode)?{maxSignalAgeSeconds:120}:{}),...(futures?{pairs:policy.pairs.map(p=>p+':USDT'),leverage:policy.demoFutures?.maxLeverage??3,marginMode:'isolated',
+  maxNotionalUsdt:'150',maxTotalNotionalUsdt:'150',...(policy.demoFutures||{})}:{}),freqtrade:{...policy.freqtrade,
   ...(isDemo(mode)?{url:'http://127.0.0.1:'+(futures?'18084':'18082'),botName:'binance-trade-'+mode,strategy:futures?'CodexDemoFutures':'CodexDemoSpot'}:{})}};
 }

@@ -77,4 +77,4 @@ Demo 公開行情、四個 Web3 查詢、DPAPI 假金鑰加密。
 本引擎無持倉時執行 npm.cmd run test:demo-account。
 它沿用風控上限；失敗請先查 status／reconcile，不要直接重跑。
 
-完整說明見 README.md；技術交接與驗證紀錄見 plans/demo-operations.md。
+完整說明見 README.md；現行規劃與部署驗證連結見 [現行計畫](plans/current-v12.md)。

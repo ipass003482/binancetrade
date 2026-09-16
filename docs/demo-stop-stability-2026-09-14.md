@@ -1,0 +1,13 @@
+# Stable unarmed ATR stop — 2026-09-14
+
+During the 15:39 UTC Demo check, actual futures trade 43 had closed through a native stop at 101.65 with net PnL -0.0460698 USDT. Entry was a 1.47 SOL short at 101.70, fees 0.0597996 + 0.0597702 USDT and funding zero. This is an old `direction-only-v12` entry, not a momentum-v1 fill. Its loss remains in the original goal and shared account results.
+
+Read-only SQLite custom data contains the original rule plan and no `net_profit_trail` activation state. Native logs show the stop progressively tightening, including 102.01, 102.00 and eventually 101.63, although the monetary trail was never armed. The source recomputed an already-tightened stop through absolute-price → ratio → absolute-price on each callback. Directional exchange rounding could reduce a short stop by another tick as quotes changed. This is an unintended implementation effect, not a model decision or a profit-trailing activation.
+
+The installed Freqtrade regression reproduced the defect for v10, v11 and v12 shorts at both tested leverage levels. Before the patch, six of twenty new cases failed; after the patch all twenty pass. Tests use changing quotes below the 0.50 USDT activation threshold, repeated callbacks, after-fill calls, spot/futures long and short, and existing tighter stops. They do not claim what the actual trade would have earned without the defect.
+
+The correction returns `None` when the monetary trail is unarmed and the selected stop is already the existing tighter stop. Freqtrade then retains that stop without another conversion. Initial ATR installation and later genuine monetary-trail activation continue through their existing logic. After-fill and restart must never widen an existing stop or reset a recorded peak. Old plans, orders and realized losses remain immutable.
+
+Native protection now attests `stopPriceVersion=stable-unarmed-stop-v1`. The host requires this fresh field from the actual loaded native process before a new entry. Entry policy `closed-price-momentum-v1`, model fingerprint, risk policy, five-minute cadence and original 30-per-mode goal are unchanged. The distinct deployment fingerprint records the execution repair; it is not a new profitable strategy claim.
+
+Evidence, tests and loaded-source records are under `local/v12-stop-stability-2026-09-14/`: `trade43-audit.json`, `trade43-native-log.data`, regression before/after logs, full test logs, `running.json` and `validation.json`. This manifest supersedes the momentum deployment manifest for checking current loaded sources; the earlier manifest remains historical evidence. No broker cancellation or real-money activation was requested.

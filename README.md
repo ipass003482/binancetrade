@@ -1,8 +1,22 @@
 # Binance trade
 
 獨立的 Windows 原生 Binance 現貨與 USDT 永續合約研究、模擬交易專案。
-Codex CLI 負責分析；程式風控決定能否送單；Freqtrade 管理訂單、持倉與退出。
+Demo 目前以固定突破規則產生決策；dry-run 保留 Codex CLI 分析。程式風控決定能否送單；Freqtrade 管理訂單、持倉與退出。
 不使用 Docker，不連接 OpenAlice／UTA，不支援真實資金交易。
+
+## 目前的 Demo 策略
+
+`config/decision.json` 已選用 Demo 實驗版 `buffered-breakout-atr-v3`。單根 5 分鐘已收盤 K 線突破／跌破前 20 根高低點，另需超過 0.1 ATR 緩衝；配合 1h／4h 方向、均線、量能與成本檢查。現貨買入／賣出持有資產，合約可做多或做空，目前限 1 倍逐倉。每個方向的排除原因與門檻分別存於 `rules.json` 的 `directionChecks`。
+
+Demo 每 5 分鐘收盤後約 5 秒啟動一輪，每輪取 96 根已收盤 K 線。1／4 小時方向分別以 12／48 根位移計算；訊號最長有效 120 秒，下一根收盤即失效。本機 dry-run 與無週期標記的舊歷史檔維持 15m。
+
+每筆新版進場會保存數值退出計畫：依成交價套用 1 ATR 比例停損（上限 2%）、2 ATR 目標、最長 4 小時。既有 ROI 與現貨追蹤停利仍可能較早退出。引擎必須回報 `demo-rule-exits-v3` 且 timeframe 為 `5m` 才可新增規則倉位，舊 v1／v2 持倉仍沿用其既有數值退出計畫。策略尚未證明獲利，僅供 Demo 測試。
+
+費率由 Demo 簽名唯讀接口讀取；缺漏或過期禁止新進場。滑點為設定假設。`watch` 每分鐘記錄全帳戶估值，未對帳外部資金流，因此估值變化不能當作策略淨利。
+
+執行 `npm run baseline -- download --mode demo --pair BTC/USDT --days 30` 可產生獨立歷史基準。資料、成本、原始碼及結果保存於 `local/<mode>/baselines/`；它不是完整引擎退出重播，也不是已驗證的樣本外績效。合約基準目前僅接受資金費率事件精確對齊 K 線邊界的資料，遇到不支援的時間戳會停止，不會假設費用為零。
+
+切換紀錄與驗證結果見 [v1 啟用紀錄](docs/rules-demo-activation-2026-09-10.md) 、[v2 進場修改](docs/entry-v2-2026-09-10.md) 與 [5 分鐘 v3 啟用](docs/five-minute-2026-09-10.md)。
 
 ## 介面預覽
 
@@ -177,6 +191,39 @@ relationship 可為 token 或 wrapped-proxy。钱包需 chainId、address、labe
 
 ## 決策與績效報表
 
+### 績效驗收與進場品質
+
+新增 `evaluate`：使用已保存交易歷史，檢查平均每筆淨損益、獲利因子、
+扣除最佳一筆後損益、連續虧損、每日結果，以及按商品／方向／槓桿／版本的分組。
+報告保留原始输入、SHA-256、門檻與評估程式副本，方便重現。
+
+```powershell
+node src/cli.mjs report --mode demo
+node src/cli.mjs evaluate --mode demo
+node src/cli.mjs report --mode demo-futures
+node src/cli.mjs evaluate --mode demo-futures
+```
+
+`report` 向引擎讀取資料；`evaluate` 只讀本機歷史，不登入、不連交易所、不下單。
+兩者都會顯示驗收結果。`config/evaluation.json` 的預設研究門檻為同版本
+100 筆已平倉、首尾成交日期跨度 30 個 UTC 日、獲利因子至少 1.2、
+淨利及扣除最佳一筆後淨利皆為正。這些是初步研究門檻，不是獲利保證或自動開倉授權。
+額外每側 5 bps 的成本情境只使用完整可核對的成交金額；缺資料會標示無法計算。
+沒有連續帳戶權益／資金流，就不計算帳戶百分比回撤。
+
+active 研究模式的新進場會由 bridge 從已完成 K 線重新計算：1h／4h 方向一致、
+價格越過 SMA8／20、相對前 19 根平均成交量至少為 1。現貨買入與合約多單要求向上，
+合約空單要求向下。資料不完整、時序錯誤或條件不符會記錄為 filtered；
+觀望、平倉不受新進場品質門檻限制。突破確認與成本空間仍需研究員判斷，通過不代表存在優勢。
+
+每次新進場保存策略來源、有效風控及觀察到的引擎退出設定指紋；舊資料不回填成新版本。
+分析中或送單前發現版本變更會阻止進場。修改後須重新啟動對應程序，
+磁碟檔案指紋本身不能證明舊程序載入了新程式。送單前再次檢查 STOP，
+既有持倉缺有效價格或損益時也不新增曝險。
+
+一般現貨僅買入／賣出已持有資產；合約支援多空。本專案尚未實作借幣現貨做空。
+本輪操作、證據與剩餘驗證見 [績效準備度紀錄](docs/profitability-readiness-2026-09-10.md)。
+
 report 產出 Markdown 與 JSON，印出可開啟的路徑，內容包括：
 
 - 每輪提案、理由、證據 ID、送單狀態，以及相對應的交易／訂單。
@@ -233,7 +280,7 @@ npm.cmd run test:native
 
 test:native 使用 18081 與獨立本機模擬資料庫；不是 Demo 帳戶測試。
 test:demo-public 不需要金鑰、不下單；test:demo-account 才會送出虛擬資金訂單。
-驗證狀態與仍待驗收項目見 [執行計畫](plans/demo-operations.md)。
+現行策略、驗證證據與尚待完成事項見 [現行計畫](plans/current-v12.md)。
 
 上游研究技能固定來源記錄在 sources/binance-skills.json。
 部分授權資訊尚不完整；上游下載的技能內容不納入本 repository，
@@ -252,7 +299,9 @@ test:demo-public 不需要金鑰、不下單；test:demo-account 才會送出虛
 
 「展示模式」或 http://127.0.0.1:18100/?preview=1 使用清楚標示的固定範例，並非帳戶績效。圖表每 30 秒更新，可手動刷新；行情地形呈現歷史價格，不是機率預測，多維圖各欄獨立正規化。Ctrl+C 關閉 UI 服務。
 
-Analyst style: `config/analyst.json` now defaults to `active`. The editable spot instructions are in [prompts/analyst-active.md](prompts/analyst-active.md), and perpetual instructions in [prompts/analyst-futures-active.md](prompts/analyst-futures-active.md); choose `conservative` for stronger confirmation requirements. Both use identical trade limits and remain dry-run/Demo only. See [analyst style and audit](docs/operations.md#analyst-style-and-audit) for provenance and evaluation limits.
+「K 線時間監控」顯示交易所時鐘偏差、最後收盤、K 線延遲、下一根收盤、下一輪研究與訊號到期，台灣時間倒數每秒更新。已暫停或排程未啟動時明確標示；時鐘失效與換根檢查在進場送單前執行。昨天完成的收盤後 5 秒排程保持不變，規則與驗證見 [時間一致性紀錄](docs/candle-alignment.md)。
+
+Analyst prompt v14: `config/analyst.json` defaults to `active`. The editable spot instructions are in [prompts/analyst-active.md](prompts/analyst-active.md), and perpetual instructions in [prompts/analyst-futures-active.md](prompts/analyst-futures-active.md); choose `conservative` for stronger confirmation requirements. Both use identical trade limits and remain dry-run/Demo only. The prompt follows the host direction matrix, so a normal Spot Demo still cannot turn `sell` into a naked short. See [prompt v14 notes](docs/prompt-v14-2026-09-16.md) and [analyst style and audit](docs/operations.md#analyst-style-and-audit) for provenance and evaluation limits.
 
 ## Demo 合約啟動
 
@@ -269,4 +318,4 @@ node src/cli.mjs engine --mode demo-futures
 
 UI 的「連接工作區 → 查看環境」可選 Demo 永續合約；BTC、ETH、SOL、BNB 的合約識別如 `BTC/USDT:USDT`，持倉顯示多空及槓桿。單筆 50 USDT 保證金，3 倍最多 150 USDT 名義金額；數量依交易所精度向下取整，低於最小金額時拒絕下單，不自動增加保證金。
 
-本次已驗證離線風控與 native adapter 契約、真實公開 Demo 合約行情；未讀取金鑰，也未完成合約帳戶的真實 Demo 成交驗收。詳見 [合約計畫](plans/demo-futures.md)。
+本節描述早期合約功能；後續已完成真正 Demo 成交。現行策略與部署證據見 [現行計畫](plans/current-v12.md)，目前帳戶狀態需即時查詢。

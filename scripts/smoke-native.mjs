@@ -46,7 +46,10 @@ try {
    evidenceIds:['spot:BTC/USDT'],reason:'Isolated native dry-run acceptance; not a strategy signal'};
  await writeJson(join(dir,'runs',snapshot.id+'.snapshot.json'),snapshot);
  await writeJson(join(dir,'runs',snapshot.id+'.proposal.json'),proposal);
- const entry=await execute({snapshot,proposal,policy,client,local:dir});
+ // This isolated wire-contract test forces a simulated entry; market signal
+ // quality has its own deterministic tests. All execution/risk limits remain.
+ const entry=await execute({snapshot,proposal,policy,client,local:dir,
+  entryQualityFn:()=>({eligible:true,reasons:[],metrics:null,scope:'isolated-native-contract-test'})});
  await assert.rejects(execute({snapshot,proposal,policy,client,local:dir}),/ALREADY_CONSUMED/);
  await waitFor(async()=>{const s=await client.snapshot();return s.trades.length===1&&!s.trades[0].has_open_orders;});
  const exitSnapshot=await collect(policy,{includeWeb3:false});

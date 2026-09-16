@@ -13,6 +13,7 @@ export async function engineArguments(mode='dry-run') {
   ||config.exchange?.key||config.exchange?.secret||config.bot_name!==p.freqtrade.botName
   ||(demo && (config.exchange.demo_trading!==true||config.strategy!==p.freqtrade.strategy))
   ||(!demo && config.exchange.demo_trading===true)
+  ||config.timeframe!==p.timeframe
   ||config.max_open_trades!==p.maxOpenTrades||String(config.stake_amount)!==p.maxStakeUsdt
   ||!(config.stoploss<0&&config.stoploss>=-0.02)||config.position_adjustment_enable!==false
   ||JSON.stringify(config.exchange.pair_whitelist)!==JSON.stringify(p.pairs)

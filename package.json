@@ -24,6 +24,8 @@
     "test:research": "node scripts/research-smoke.mjs",
     "health": "node src/cli.mjs health",
     "report": "node src/cli.mjs report",
+    "evaluate": "node src/cli.mjs evaluate",
+    "baseline": "node scripts/baseline.mjs",
     "setup:demo": "node src/cli.mjs setup --mode demo",
     "test:demo-public": ".venv\\Scripts\\python.exe scripts/demo-public.py",
     "test:demo-account": "node scripts/smoke-demo-account.mjs --allow-demo-orders",

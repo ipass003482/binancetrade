@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture,engineConfig } from './fixtures.mjs';
+import { fixture,engineConfig,trendCandles,clockFixture } from './fixtures.mjs';
 import { loadPolicy,ProposalSchema,FuturesProposalSchema } from '../src/config.mjs';
 import { modeLocal } from '../src/mode.mjs';
 import { assess } from '../src/risk.mjs';
@@ -18,14 +18,15 @@ import { DashboardStore,previewData } from '../ui/store.mjs';
 const filters=[{filterType:'LOT_SIZE',minQty:'0.001',maxQty:'1000',stepSize:'0.001'},
  {filterType:'MARKET_LOT_SIZE',minQty:'0.001',maxQty:'1000',stepSize:'0.001'},{filterType:'MIN_NOTIONAL',notional:'5'}];
 async function futureFixture(action='open-short'){
- const f=await fixture();f.policy=await loadPolicy('demo-futures');f.snapshot.mode=f.policy.mode;
+ const f=await fixture();f.policy={...await loadPolicy('demo-futures'),leverage:3,maxStakeUsdt:'50',maxExposureUsdt:'50',maxOpenTrades:2,maxNotionalUsdt:'150',maxTotalNotionalUsdt:'150',maxDailyLossUsdt:'20',maxEntriesPerDay:4};f.snapshot.mode=f.policy.mode;f.snapshot.timeframe='5m';f.snapshot.candleBoundary=Math.floor(f.now/300000)*300000;
  const pair='BTC/USDT:USDT';f.proposal={...f.proposal,action,pair,leverage:3,evidenceIds:['futures:'+pair]};
- f.snapshot.evidence=[{id:'futures:'+pair,status:'ok'}];
- f.snapshot.markets=[{...f.snapshot.markets[0],pair,mode:f.policy.mode,source:'https://demo-fapi.binance.com',verifiedSpot:false,verifiedFutures:true,filters}];
- f.executionQuote=structuredClone(f.snapshot.markets[0]);return f;
+ f.snapshot.clock=clockFixture(f.now,f.policy.mode);
+ f.snapshot.evidence=[{id:'futures:'+pair,status:'ok',data:{pair}},{id:'technical:'+pair,pair,status:'ok'}];
+ f.snapshot.markets=[{...f.snapshot.markets[0],pair,mode:f.policy.mode,source:'https://demo-fapi.binance.com',verifiedSpot:false,verifiedFutures:true,filters,candles:trendCandles(f.now,action.endsWith('short')?'short':'long','5m')}];
+ f.snapshot.markets[0].clock=f.snapshot.clock;f.executionQuote=structuredClone(f.snapshot.markets[0]);return f;
 }
 function position(pair='ETH/USDT:USDT',isShort=true){return {trade_id:7,pair,has_open_orders:false,is_short:isShort,is_open:true,
- trading_mode:'futures',leverage:3,stake_amount:25,amount:.75,current_rate:100,total_profit_abs:0};}
+ trading_mode:'futures',leverage:3,stake_amount:25,amount:.75,current_rate:100,profit_abs:0,total_profit_abs:0};}
 const local=()=>mkdtemp(join(tmpdir(),'binance-futures-'));
 
 test('four-symbol futures mode has separate state and isolated engine identity',async()=>{
@@ -81,9 +82,16 @@ test('native client passes long/short and leverage only to futures entries, all 
 
 test('unknown short entry stays blocked until direction and leverage are proven',async()=>{
  const f=await futureFixture(),dir=await local();let tag;
+ f.getDecisionConfig=async()=>({demoEngine:'ai'});
+ f.portfolioEntryFn=async(_opts,run)=>run(async()=>({checked:true}));f.protectionCheckFn=async()=>({verified:true});
+ f.snapshot.costFacts={mode:'demo-futures',kind:'costs',readOnly:true,source:'https://demo-fapi.binance.com',observedAt:f.snapshot.createdAt,
+  rates:[{pair:f.proposal.pair,status:'ok',buyRate:'0.0004',sellRate:'0.0004'}]};
+ f.executionQuote.fundingRate='0';
  await assert.rejects(execute({...f,now:()=>f.now,local:dir,getQuote:async()=>f.executionQuote,client:{snapshot:async()=>f.account,submit:async(p,t)=>{tag=t;throw new Error('SIMULATED_TIMEOUT');}}}),/SIMULATED_TIMEOUT/);
  const rows=await journalRead(join(dir,'orders.jsonl'));assert.equal(rows[0].action,'open-short');assert.equal(rows[0].leverage,3);assert.equal(rows.at(-1).status,'unknown');
- const t={...position(f.proposal.pair,false),enter_tag:tag};
+ const t={...position(f.proposal.pair,false),enter_tag:tag,amount_requested:0.75,amount_precision:0.001,precision_mode:4,
+  orders:[{ft_is_entry:true,ft_order_tag:tag,pair:f.proposal.pair,ft_order_side:'sell',order_id:'test-order',
+   status:'closed',is_open:false,filled:0.75,amount:0.75,remaining:0,average:100,cost:75}]};
  const client={assertMode:async()=>{},history:async()=>[t]};
  assert.equal((await reconcile(dir,client))[0].status,'unresolved');
  t.is_short=true;t.leverage=2;assert.equal((await reconcile(dir,client))[0].status,'unresolved');
@@ -97,12 +105,13 @@ test('pending close-short reconciles against a buy-side reduce-position order',a
 });
 
 function publicMock(url){
- const u=new URL(url),symbol=u.searchParams.get('symbol')??'BTCUSDT',end=Math.floor(Date.now()/900000)*900000;
+ const u=new URL(url),symbol=u.searchParams.get('symbol')??'BTCUSDT',end=Math.floor(Date.now()/300000)*300000;
  let value;
- if(u.pathname.endsWith('exchangeInfo'))value={symbols:['BTC','ETH','SOL','BNB'].map(base=>({symbol:base+'USDT',baseAsset:base,quoteAsset:'USDT',marginAsset:'USDT',contractType:'PERPETUAL',status:'TRADING',filters}))};
+ if(u.pathname.endsWith('/time'))value={serverTime:Date.now()};
+ else if(u.pathname.endsWith('exchangeInfo'))value={symbols:['BTC','ETH','SOL','BNB'].map(base=>({symbol:base+'USDT',baseAsset:base,quoteAsset:'USDT',marginAsset:'USDT',contractType:'PERPETUAL',status:'TRADING',filters}))};
  else if(u.pathname.endsWith('bookTicker'))value={symbol,bidPrice:'100',askPrice:'100.01'};
  else if(u.pathname.endsWith('premiumIndex'))value={symbol,markPrice:'100',lastFundingRate:'0.0001',nextFundingTime:end+28800000};
- else value=Array.from({length:32},(_,i)=>[end-(32-i)*900000,'100','102','99','101','10',end-(31-i)*900000-1]);
+ else value=Array.from({length:96},(_,i)=>[end-(96-i)*300000,'100','102','99','101','10',end-(95-i)*300000-1]);
  return Promise.resolve(new Response(JSON.stringify(value)));
 }
 test('futures collector verifies all four contracts on the dedicated public Demo route',async()=>{

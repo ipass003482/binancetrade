@@ -7,18 +7,25 @@ import { jsonFetch } from './http.mjs';
 import { loadResearchProfile,technicalSummary,compactEvidence } from './research-profile.mjs';
 import { safeError } from './health.mjs';
 import { MODES,isFutures } from './mode.mjs';
+import { readExchangeClock } from './exchange-clock.mjs';
+import { clockBoundary,clockDecisionBoundary,FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS } from './entry-timing.mjs';
+import { timeframeSpec,tradingTimeframe } from './timeframe.mjs';
+import {readOrderFlow} from './order-flow-collector.mjs';
 const PUBLIC='https://data-api.binance.vision';
-export async function market(pair,{fetchImpl=fetch,mode='dry-run'}={}) {
+export async function market(pair,{fetchImpl=fetch,mode='dry-run',clock,candleBoundary}={}) {
  if(!MODES.includes(mode))throw new Error('MARKET_MODE_REJECTED');
+ const spec=timeframeSpec(tradingTimeframe(mode));
  const futures=isFutures(mode),base=futures?'https://demo-fapi.binance.com':mode==='demo'?'https://demo-api.binance.com':PUBLIC;
  const prefix=futures?'/fapi/v1':'/api/v3';
  let quoteFetchedAt;
  if(!(futures?/^[A-Z0-9]+\/USDT:USDT$/:/^[A-Z0-9]+\/USDT$/).test(pair)) throw new Error('INVALID_MARKET_PAIR');
+ clock=clock??await readExchangeClock(mode,{fetchImpl});
+ candleBoundary=candleBoundary??clockBoundary(clock,mode);
  const symbol=pair.split(':')[0].replace('/',''), query='?symbol='+symbol;
  const [info,book,bars]=await Promise.all([
   jsonFetch(base+prefix+'/exchangeInfo'+(futures?'':query),{fetchImpl}),
   jsonFetch(base+prefix+'/ticker/bookTicker'+query,{fetchImpl}).then(value=>{quoteFetchedAt=new Date().toISOString();return value;}),
-  jsonFetch(base+prefix+'/klines'+query+'&interval=15m&limit=33',{fetchImpl})
+  jsonFetch(base+prefix+'/klines'+query+'&interval='+spec.timeframe+'&limit='+(spec.historyBars+1),{fetchImpl})
  ]);
  const instrument=info.symbols?.find(s=>s.symbol===symbol);
  if(!instrument || instrument.status!=='TRADING' || instrument.baseAsset+'/'+instrument.quoteAsset!==pair.split(':')[0]
@@ -28,14 +35,15 @@ export async function market(pair,{fetchImpl=fetch,mode='dry-run'}={}) {
  const bid=new Decimal(book.bidPrice), ask=new Decimal(book.askPrice);
  if(!bid.isFinite() || !ask.isFinite() || bid.lte(0) || ask.lt(bid)) throw new Error('Invalid quote');
  const now=Date.now();
- const closed=bars.filter(b=>Array.isArray(b) && b[6]<now).slice(-32);
- if(closed.length<20 || now-closed.at(-1)[6]>1800000) throw new Error('Insufficient or stale candles');
+ const closed=bars.filter(b=>Array.isArray(b) && b[6]<candleBoundary).slice(-spec.historyBars);
+ if(closed.length<spec.historyBars || now-closed.at(-1)[6]>2*spec.ms) throw new Error('Insufficient or stale candles');
  const funding=futures?await jsonFetch(base+prefix+'/premiumIndex'+query,{fetchImpl}):null;
  if(futures&&(funding.symbol!==symbol||typeof funding.lastFundingRate!=='string'||funding.lastFundingRate.trim()===''||!Number.isFinite(Number(funding.lastFundingRate))||!Number.isFinite(Number(funding.markPrice))||!(Number(funding.markPrice)>0)))throw new Error('INVALID_FUNDING_MARK');
- return {pair,...(futures?{verifiedFutures:true,contractType:'PERPETUAL',marginAsset:'USDT',filters:instrument.filters,markPrice:funding.markPrice,fundingRate:funding.lastFundingRate,nextFundingTime:funding.nextFundingTime}:{verifiedSpot:true}),bid:bid.toFixed(),ask:ask.toFixed(),
+ const orderFlow=mode==='dry-run'?null:await readOrderFlow(mode,pair);
+ return {pair,orderFlow,filters:instrument.filters,...(futures?{verifiedFutures:true,contractType:'PERPETUAL',marginAsset:'USDT',markPrice:funding.markPrice,fundingRate:funding.lastFundingRate,nextFundingTime:funding.nextFundingTime}:{verifiedSpot:true}),bid:bid.toFixed(),ask:ask.toFixed(),
   spreadBps:ask.minus(bid).div(bid).mul(10000).toNumber(),
   candles:closed.map(b=>({openTime:b[0],open:b[1],high:b[2],low:b[3],close:b[4],volume:b[5],closeTime:b[6]})),
-  source:base,mode,fetchedAt:quoteFetchedAt,quoteAsOf:null,
+  source:base,mode,timeframe:spec.timeframe,clock,candleBoundary,fetchedAt:quoteFetchedAt,quoteAsOf:null,
   note:'Public REST quote has no exchange event timestamp; fetchedAt is retrieval time.'};
 }
 export async function web3(skill,command,params,{fetchImpl=fetch}={}) {
@@ -68,10 +76,14 @@ export async function web3(skill,command,params,{fetchImpl=fetch}={}) {
   data:unavailable?{hasResult:false,isSupported:data.data?.isSupported===true,note:'Audit unavailable; not a low-risk result'}:data};
 }
 export async function collect(policy,{fetchImpl=fetch,includeWeb3=true,profile,queryWeb3=web3}={}) {
- const snapshot={id:randomUUID(),createdAt:new Date().toISOString(),mode:policy.mode,markets:[],evidence:[],errors:[],researchCoverage:[]};
- snapshot.markets=await Promise.all(policy.pairs.map(pair=>market(pair,{fetchImpl,mode:policy.mode})));
+ const clock=await readExchangeClock(policy.mode,{fetchImpl}),createdAt=new Date().toISOString();
+ const candleBoundary=clockBoundary(clock,policy.mode,Date.parse(createdAt));
+ const decision=policy.mode==='dry-run'?{}:{decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,
+  decisionIntervalMs:FLOW_DECISION_INTERVAL_MS,decisionBoundary:clockDecisionBoundary(clock,policy.mode,Date.parse(createdAt))};
+ const snapshot={id:randomUUID(),timeframe:tradingTimeframe(policy.mode),createdAt,clock,candleBoundary,...decision,mode:policy.mode,markets:[],evidence:[],errors:[],researchCoverage:[]};
+ snapshot.markets=await Promise.all(policy.pairs.map(pair=>market(pair,{fetchImpl,mode:policy.mode,clock,candleBoundary})));
  for(const m of snapshot.markets){
-  const technical=technicalSummary(m.candles);
+  const technical=technicalSummary(m.candles,m.timeframe);
   snapshot.evidence.push({id:(isFutures(policy.mode)?'futures:':'spot:')+m.pair,status:'ok',source:m.source,fetchedAt:m.fetchedAt,data:m});
   snapshot.evidence.push({id:'technical:'+m.pair,pair:m.pair,status:'ok',source:m.source,
    fetchedAt:m.fetchedAt,data:technical});

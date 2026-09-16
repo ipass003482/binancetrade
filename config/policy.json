@@ -10,6 +10,24 @@
   "maxStakeUsdt": "50",
   "maxExposureUsdt": "50",
   "maxOpenTrades": 2,
+  "demoSpot": {
+    "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "SUI/USDT", "UNI/USDT", "NEAR/USDT", "ADA/USDT"],
+    "maxStakeUsdt": "300",
+    "maxExposureUsdt": "900",
+    "maxOpenTrades": 3,
+    "maxEntriesPerDay": 0,
+    "maxDailyLossUsdt": "50"
+  },
+  "demoFutures": {
+    "maxStakeUsdt": "150",
+    "maxExposureUsdt": "150",
+    "maxOpenTrades": 1,
+    "maxNotionalUsdt": "150",
+    "maxTotalNotionalUsdt": "150",
+    "maxLeverage": 1,
+    "maxDailyLossUsdt": "50",
+    "maxEntriesPerDay": 0
+  },
   "maxDailyLossUsdt": "20",
   "maxEntriesPerDay": 4,
   "maxSignalAgeSeconds": 600,

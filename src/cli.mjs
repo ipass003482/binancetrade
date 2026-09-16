@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { writeFile,unlink,mkdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import {startOrderFlowSampler} from './order-flow-collector.mjs';
 import { ROOT } from './paths.mjs';
 import { modeArgs,modeLocal } from './mode.mjs';
 import { loadPolicy } from './config.mjs';
@@ -18,6 +20,14 @@ import { runCycle } from './workflow.mjs';
 import { reconcile } from './reconcile.mjs';
 import { healthStatus,healthUpdate,recoverLock,safeError } from './health.mjs';
 import { buildReport } from './report.mjs';
+import { evaluateSavedHistory } from './evaluation.mjs';
+import { nextDecisionBoundary,lastDecisionClaim,claimDecisionBoundary,closeBufferMs } from './candle-schedule.mjs';
+import {FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS} from './entry-timing.mjs';
+import { recordEquity } from './equity.mjs';
+import { collectCosts } from './trading-costs.mjs';
+import { beginForwardTrial,refreshForwardReport } from './forward-store.mjs';
+import { FLOW_ONLY_PARAMETERS as DEMO_PARAMETERS,DEMO_RULE_VERSION } from './demo-rules.mjs';
+import { refreshPortfolio } from './portfolio-store.mjs';
 const out=x=>console.log(JSON.stringify(x,null,2));
 const parsed=modeArgs(process.argv.slice(2)),mode=parsed.mode,LOCAL=modeLocal(mode);
 const [command,...args]=parsed.args;
@@ -27,7 +37,22 @@ async function saveResearch(){
  const snapshot=await collect(await loadPolicy(mode)),file=join(LOCAL,'runs',snapshot.id+'.snapshot.json');
  await writeJson(file,snapshot);return {snapshot,file};
 }
-async function cycle(signal){return runCycle({local:LOCAL,policy:await loadPolicy(mode),client:await client(),signal});}
+async function cycle(signal,scheduledDecisionBoundary){return runCycle({local:LOCAL,policy:await loadPolicy(mode),client:await client(),signal,scheduledDecisionBoundary});}
+export async function assertProtectionResumeAllowed(selectedMode,{localFor=modeLocal}={}){
+ if(selectedMode==='dry-run')return;
+ if(!['demo','demo-futures'].includes(selectedMode))throw Error('MODE_REJECTED');
+ for(const checkMode of ['demo','demo-futures']){
+  const file=join(localFor(checkMode),'protection-readiness.json');
+  if(!await exists(file))continue; // Missing readiness is not a claim of protection.
+  const protection=await readJson(file);
+  if(protection.version!=='demo-native-stop-v1'||protection.mode!==checkMode||!Array.isArray(protection.attempts)
+   ||!Number.isInteger(protection.unresolvedStops)||protection.unresolvedStops<0
+   ||protection.attempts.some(attempt=>!attempt||!['pending','unknown','confirmed','rejected'].includes(attempt.status)))
+   throw Error('DEMO_PROTECTION_STATE_INVALID');
+  if(protection.unresolvedStops>0||protection.attempts.some(attempt=>['pending','unknown'].includes(attempt.status)))
+   throw Error('DEMO_PROTECTION_UNRESOLVED');
+ }
+}
 async function doctor(){
  const report={node:process.version,mode,dockerRequired:false,checks:{}};
  for(const[name,exe,argv]of[['codex',process.platform==='win32'?'codex.exe':'codex',['--version']],['freqtrade',PYTHON,['-m','freqtrade','--version']]]){
@@ -42,23 +67,61 @@ async function doctor(){
 }
 async function watch(){
  return lock(join(LOCAL,'watch.lock'),async()=>{
+  // One startup marker records the user's requested continuous operation.
+  // STOP pauses this entry watcher, while the separate engine supervisor can
+  // still maintain exits. Heartbeats and shutdown must not reset this marker.
+  await writeJson(join(LOCAL,'continuous.json'),{enabled:true,updatedAt:new Date().toISOString(),
+   ...(mode==='dry-run'?{}:{decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,decisionIntervalMs:FLOW_DECISION_INTERVAL_MS})});
+  const forwardClient=mode==='dry-run'?null:await client();
+  if(forwardClient)await beginForwardTrial(LOCAL,mode,await forwardClient.history(),{ruleVersion:DEMO_RULE_VERSION,parameters:DEMO_PARAMETERS});
   const abort=new AbortController(),stop=()=>abort.abort();
   process.once('SIGINT',stop);process.once('SIGTERM',stop);
   let pending=Promise.resolve();
   const heartbeat=()=>{pending=pending.then(()=>writeJson(join(LOCAL,'watch-heartbeat.json'),{pid:process.pid,at:new Date().toISOString()})).catch(()=>{});};
   heartbeat();const timer=setInterval(heartbeat,15000);
+  const stopFlow=mode==='dry-run'?async()=>{}:startOrderFlowSampler(await loadPolicy(mode),LOCAL);
+  let equityTask=null;
+  const sampleEquity=()=>{if(mode==='dry-run'||equityTask)return;equityTask=recordEquity(LOCAL,mode)
+   .then(r=>healthUpdate(LOCAL,{lastEquitySampleAt:r?.observedAt??null,lastEquityError:r?.lastAttempt?.reason??null}))
+   .catch(e=>healthUpdate(LOCAL,{lastEquityError:safeError(e)})).catch(()=>{})
+   .then(()=>refreshForwardReport(LOCAL,forwardClient))
+   .catch(e=>healthUpdate(LOCAL,{lastForwardError:safeError(e)})).catch(()=>{})
+   .finally(()=>{equityTask=null;});};
+  sampleEquity();const equityTimer=setInterval(sampleEquity,60000);
+  let portfolioTask=null;
+  const samplePortfolio=()=>{
+   if(mode==='dry-run'||portfolioTask)return;
+   portfolioTask=refreshPortfolio()
+    .then(report=>healthUpdate(LOCAL,{lastPortfolioSampleAt:report.asOf,lastPortfolioError:null}))
+    .catch(error=>healthUpdate(LOCAL,{lastPortfolioError:safeError(error)})).catch(()=>{})
+    .finally(()=>{portfolioTask=null;});
+  };
+  samplePortfolio();const portfolioTimer=setInterval(samplePortfolio,60000);
   try{
    while(!abort.signal.aborted){
     if(await exists(join(LOCAL,'STOP'))){out({status:'stopped'});break;}
-    try{out(await cycle(abort.signal));}
+    let boundary;const closeBuffer=closeBufferMs(mode);
+    if(mode!=='dry-run'){
+     boundary=nextDecisionBoundary(Date.now(),await lastDecisionClaim(LOCAL),mode);
+     await healthUpdate(LOCAL,{stage:'waiting_decision',nextResearchAt:new Date(boundary+closeBuffer).toISOString()});
+     while(Date.now()<boundary+closeBuffer&&!abort.signal.aborted&&!await exists(join(LOCAL,'STOP'))){
+      try{await delay(Math.min(1000,boundary+closeBuffer-Date.now()),null,{signal:abort.signal});}catch{break;}
+     }
+     if(abort.signal.aborted||await exists(join(LOCAL,'STOP')))break;
+     if(!await claimDecisionBoundary(LOCAL,boundary,Date.now(),mode))continue;
+    }
+    try{out(await cycle(abort.signal,boundary));}
     catch(e){out({status:'cycle_failed',error:safeError(e)});}
+    if(mode!=='dry-run')continue;
     const end=Date.now()+(await loadPolicy(mode)).intervalSeconds*1000;
     while(Date.now()<end&&!abort.signal.aborted&&!await exists(join(LOCAL,'STOP'))){
      try{await delay(Math.min(1000,end-Date.now()),null,{signal:abort.signal});}catch{break;}
     }
    }
   }finally{
-   clearInterval(timer);await pending;process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
+   clearInterval(timer);clearInterval(equityTimer);clearInterval(portfolioTimer);
+   await stopFlow();await pending;await Promise.allSettled([equityTask,portfolioTask]);
+   process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
   }
  });
 }
@@ -82,10 +145,14 @@ async function main(){
   finally{process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);}
  }
  case 'watch':count(0);return watch();
+ case 'costs':count(0);return out(await collectCosts(await loadPolicy(mode)));
+ case 'equity':count(0);return out(await recordEquity(LOCAL,mode));
+ case 'portfolio':count(0);if(mode==='dry-run')throw Error('PORTFOLIO_DEMO_ONLY');return out(await refreshPortfolio());
  case 'stop':count(0);await mkdir(LOCAL,{recursive:true});await writeFile(join(LOCAL,'STOP'),new Date().toISOString());
   return out({mode,status:'entry_stopped',message:'Existing positions remain managed by engine exits. No liquidation requested.'});
  case 'resume':count(0);{
   await(await client()).snapshot();
+  await assertProtectionResumeAllowed(mode);
   const records=await journalRead(join(LOCAL,'orders.jsonl')),latest=new Map(records.map(r=>[r.id,r]));
   if([...latest.values()].some(r=>['pending','unknown'].includes(r.status)))throw new Error('UNRESOLVED_SUBMISSION');
   if(await exists(join(LOCAL,'STOP')))await unlink(join(LOCAL,'STOP'));
@@ -100,6 +167,9 @@ async function main(){
  case 'recover-lock':count(1);return out(await recoverLock(LOCAL,args[0]));
  case 'reconcile':count(0);return out(await reconcile(LOCAL,await client()));
  case 'report':count(0);return out(await buildReport(LOCAL,await client(),mode));
+ case 'forward':count(0);return out(await refreshForwardReport(LOCAL,await client()));
+ case 'evaluate':if(args.length>1)throw new Error('INVALID_ARGUMENTS: evaluate [saved-history.json]');
+  return out(await evaluateSavedHistory({local:LOCAL,mode,...(args[0]?{input:args[0]}:{})}));
  case 'demo-check':count(0);{
   if(mode==='dry-run')throw new Error('DEMO_MODE_REQUIRED');
   try{
@@ -119,6 +189,10 @@ async function main(){
   'cycle / watch                One guarded cycle or foreground repeat\n'+
   'stop / resume                Pause or enable entries; no liquidation\n'+
   'status / health / report     Account, health, Markdown + JSON report\n'+
+  'forward                     Current actual Demo trial results, probes separated\n'+
+  'portfolio --mode demo        Refresh shared spot/futures Demo capital and performance\n'+
+  'evaluate [saved-history.json] Offline performance evidence; no orders or network\n'+
+  'costs / equity               Read-only Demo fee facts or equity sample\n'+
   'reconcile                    Resolve only proven submission outcomes\n'+
   'recover-lock <name>          Remove one lock only after proving no owner/child/project process\n'+
   'demo-check --mode demo       Read-only Demo account/market connectivity\n'+
@@ -128,4 +202,5 @@ async function main(){
  default:throw new Error('UNKNOWN_COMMAND');
  }
 }
-main().catch(e=>{console.error(JSON.stringify({error:safeError(e)}));process.exitCode=1;});
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)
+ main().catch(e=>{console.error(JSON.stringify({error:safeError(e)}));process.exitCode=1;});

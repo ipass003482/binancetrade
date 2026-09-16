@@ -1,4 +1,7 @@
-param([Parameter(Mandatory=$true)][string]$CredentialFile)
+param(
+ [Parameter(Mandatory=$true)][string]$CredentialFile,
+ [switch]$ProbeOnly
+)
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 try {
@@ -10,5 +13,9 @@ try {
   try { $demoResult[$demoField] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($demoPointer) }
   finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($demoPointer) }
  }
- $demoResult | ConvertTo-Json -Compress
+ if ($ProbeOnly) {
+  @{ status = 'passed'; keyPresent = ($demoResult.key.Length -ge 16); secretPresent = ($demoResult.secret.Length -ge 16); credentialsExposed = $false } | ConvertTo-Json -Compress
+ } else {
+  $demoResult | ConvertTo-Json -Compress
+ }
 } catch { [Console]::Error.WriteLine('Demo credential decryption failed'); exit 1 }

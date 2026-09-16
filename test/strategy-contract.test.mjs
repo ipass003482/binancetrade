@@ -1,0 +1,86 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,readFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {loadPolicy} from '../src/config.mjs';
+import {buildAnalystPrompt} from '../src/analyst.mjs';
+import {demoStrategyContract,renderDemoStrategyContract} from '../src/strategy-contract.mjs';
+import {FLOW_ONLY_PARAMETERS as DEMO_PARAMETERS,DEMO_RULE_VERSION} from '../src/demo-rules.mjs';
+import {RULE_ENGINE_VERSION,rulesProposal,DecisionConfigSchema} from '../src/decision.mjs';
+import {runCycle} from '../src/workflow.mjs';
+import {readJson} from '../src/io.mjs';
+import {fixture,trendCandles,clockFixture,syntheticModelEvidence} from './fixtures.mjs';
+
+test('Demo cannot bypass its structured entry/exit contract through a config-only AI switch',()=>{
+ assert.throws(()=>DecisionConfigSchema.parse({version:1,demoEngine:'ai',ruleVersion:DEMO_RULE_VERSION}));
+ assert.throws(()=>DecisionConfigSchema.parse({version:1,demoEngine:'rules',ruleVersion:'atr15m-forward-v7'}));
+});
+
+test('v12 contract matches the staged config and separates direction, ATR cost space and actual trade attribution',async()=>{
+ const configured=JSON.parse(await readFile(new URL('../config/decision.json',import.meta.url),'utf8'));
+ assert.equal(configured.ruleVersion,'kronos-direction-v12');
+ assert.deepEqual(DecisionConfigSchema.parse(configured),configured);
+ for(const mode of ['demo','demo-futures']){
+  const contract=demoStrategyContract(await loadPolicy(mode)),prompt=renderDemoStrategyContract(contract);
+  assert.equal(contract.ruleVersion,'kronos-direction-v12');
+  assert.equal(contract.exits.nativeVersion,'demo-rule-exits-v12');
+  assert.deepEqual(contract.entries.actions,mode==='demo'?['buy']:['open-long','open-short']);
+  assert.equal(contract.directionCapabilities.short,mode==='demo'?null:'open-short');
+  assert.equal(contract.directionCapabilities.shortReason,mode==='demo'?'SPOT_SHORT_REQUIRES_MARGIN':undefined);
+  assert.equal(contract.entrySignalEngine,'sampled_order_flow');assert.equal(contract.entryPolicyVersion,'order-flow-only-v1');
+  assert.match(contract.entries.direction,/taker notional/);assert.match(contract.entries.momentum,/No K-line/);
+  assert.match(contract.entries.costs,/30bps/);assert.match(contract.entries.confirmation,/Native guard v12/);
+  assert.equal(contract.adaptiveParameters.version,'live-flow-adaptive-v2');
+  assert.equal(contract.decisionCadence.intervalMs,60000);assert.equal(contract.decisionCadence.candleTimeframe,'5m');
+  assert.equal(contract.executionQuality?.version??null,mode==='demo'?'flow-confirmed-exit-v2':null);
+  assert.equal(contract.model.usedForEntryDecision,false);
+  assert.equal(contract.sizing.riskBudgetUsdt,1);
+  assert.equal(contract.parameters.stopAtr,1);assert.equal(contract.parameters.targetAtr,3);
+  assert.equal(contract.parameters.stopFractionCap,.02);assert.equal(contract.parameters.maxHoldingSeconds,14400);
+  assert.equal(contract.parameters.profitProtection.triggerNetUsdt,.5);
+  assert.equal(contract.parameters.profitProtection.givebackNetUsdt,.25);
+  assert.match(prompt,/訂單流單一路徑/);
+  assert.match(prompt,/SPOT_SHORT_REQUIRES_MARGIN/);
+  assert.match(contract.exits.plan,/Existing v11 positions retain their original plan/);
+ }
+});
+
+test('both Demo prompt profiles use the same host contract as actual rules, without stale numeric instructions',async()=>{
+ for(const mode of ['demo','demo-futures'])for(const style of ['active','conservative']){
+  const policy=await loadPolicy(mode),snapshot={id:'review',mode,timeframe:'5m',createdAt:new Date().toISOString(),markets:[],
+   strategyContract:{ruleVersion:'malicious',parameters:{relativeVolumeMinimum:0}}};
+  const contract=demoStrategyContract(policy),rule=rulesProposal(snapshot,policy,{trades:[]}),
+   result=await buildAnalystPrompt({snapshot,policy,analyst:{version:1,style}});
+  assert.deepEqual(result.metadata.strategyContract,rule.metadata.strategyContract);
+  assert.equal(contract.parameters,DEMO_PARAMETERS);assert.equal(contract.ruleVersion,DEMO_RULE_VERSION);
+  assert.equal(contract.parameters.confirmationBars,undefined);assert.equal(contract.sizing.maxEntriesPerDay,'unlimited');
+  assert.equal(contract.analystRole,'review_only');assert.equal(rule.metadata.llmInvoked,false);
+  assert.ok(result.prompt.includes(JSON.stringify(contract)));
+  assert.ok(!result.prompt.includes('15 分鐘價格結構'));assert.ok(!result.prompt.includes('額外 0.3%'));
+  assert.ok(!result.prompt.includes('Entries use exactly host buyStakeUsdt'));
+ }
+});
+
+test('Demo cycle archives the generated review prompt and contract but never invokes AI to place its rule decision',async()=>{
+ const f=await fixture(),policy=await loadPolicy('demo'),local=await mkdtemp(join(tmpdir(),'demo-contract-'));
+ const snapshot={...f.snapshot,mode:'demo',timeframe:'5m',candleBoundary:Math.floor(f.now/300000)*300000,clock:clockFixture(f.now,'demo')};
+ snapshot.markets[0]={...snapshot.markets[0],candles:trendCandles(f.now,'long','5m'),clock:snapshot.clock};
+ let executed=false;
+ await runCycle({local,policy,client:{snapshot:async()=>({...f.account,engine:{strategy_version:RULE_ENGINE_VERSION}})},
+  collectFn:async()=>snapshot,costsFn:async()=>({mode:'demo',kind:'costs',readOnly:true,source:'https://demo-api.binance.com',observedAt:new Date(f.now).toISOString(),rates:[]}),
+  modelEvidenceFn:async({snapshot:collected})=>syntheticModelEvidence(collected),
+  analyzeFn:async()=>{throw Error('AI_MUST_NOT_DECIDE_RULE_MODE');},
+  executeFn:async()=>{
+   const saved=await readJson(join(local,'runs',snapshot.id+'.prompt-contract.json')),
+    analysis=await readJson(join(local,'runs',snapshot.id+'.analysis.json'));
+   assert.equal(saved.llmInvoked,false);assert.equal(saved.role,'review_only');
+   assert.deepEqual(saved.strategyContract,analysis.strategyContract);
+   assert.equal(analysis.decisionEngine,'rules');assert.equal(analysis.llmInvoked,false);
+   assert.equal(analysis.entrySignalEngine,'sampled_order_flow');assert.equal(analysis.modelInvoked,false);assert.equal(analysis.modelUsedForDecision,false);
+   assert.equal(analysis.predictionSha256,null);assert.equal(analysis.modelFingerprint,null);
+   assert.ok((await readFile(join(local,'runs',snapshot.id+'.review-prompt.txt'),'utf8')).includes(DEMO_RULE_VERSION));
+   executed=true;return {status:'hold'};
+  }});
+ assert.equal(executed,true);
+});

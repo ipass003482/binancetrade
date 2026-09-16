@@ -35,6 +35,12 @@ test('stop and daily loss do not prevent closing an existing spot position',asyn
  f.account.trades[0].has_open_orders=true;assert.throws(()=>assess(f),/NO_UNAMBIGUOUS/);
 });
 
+test('zero daily entry limit means unlimited entries',async()=>{
+ const f=await fixture();f.policy.maxEntriesPerDay=0;
+ f.records=Array.from({length:1000},()=>({status:'pending',action:'buy',at:new Date(f.now).toISOString()}));
+ assert.equal(assess(f).action,'buy');
+});
+
 test('rejects execution quote that has moved since research',async()=>{
  const f=await fixture();f.executionQuote.ask='102';assert.throws(()=>assess(f),/PRICE_MOVED/);
 });

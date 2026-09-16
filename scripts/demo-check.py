@@ -9,8 +9,8 @@ spec = importlib.util.spec_from_file_location("demo_adapter", ROOT / "scripts/de
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
 
-def check():
-    credentials = adapter.read_credentials()
+def check(credentials_stdin=False):
+    credentials = adapter.read_credentials(stdin=credentials_stdin)
     adapter.protect_transports()
     config = {"dry_run": False, "runmode": RunMode.LIVE, "trading_mode": "spot", "margin_mode": "",
         "exchange": {"name": "binance", "demo_trading": True, "enable_ws": False,
@@ -32,7 +32,9 @@ def check():
 
 if __name__ == "__main__":
     try:
-        print(json.dumps(check()))
+        if sys.argv[1:] not in ([], ["--credentials-stdin"]):
+            raise ValueError("DEMO_ARGUMENTS_REJECTED")
+        print(json.dumps(check(credentials_stdin=sys.argv[1:] == ["--credentials-stdin"])))
     except Exception as error:
         print(json.dumps({"status": "failed", "code": type(error).__name__,
             "message": "Check local Demo credentials, permissions and connectivity. No orders submitted."}))

@@ -13,6 +13,9 @@ import freqtrade.exchange as exchanges
 from freqtrade.exchange.binance import Binance
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / 'scripts'))
+from demo_protection import GuardedDemoStops, pin_demo_exit_config
+from demo_model_guard import guard_order_wire
 DEMO_HOST = "demo-api.binance.com"
 
 def check_url(url):
@@ -38,7 +41,7 @@ def protect_transports():
         return await old_request(self, method, str_or_url, **kwargs)
     aiohttp.ClientSession._request = request
 
-class DemoBinance(Binance):
+class DemoBinance(GuardedDemoStops, Binance):
     demo_destination_guard = True
     _ft_has = {**Binance._ft_has, "supports_demo_trading": True, "has_delisting": False, "ws_enabled": False}
     def _init_ccxt(self, exchange_config, sync, ccxt_kwargs):
@@ -51,6 +54,8 @@ class DemoBinance(Binance):
         if inspect.iscoroutinefunction(original):
             async def fetch(url, *args, **kwargs):
                 check_url(url)
+                guard_order_wire(self, url, args[0] if args else kwargs.get('method', 'GET'),
+                                 args[2] if len(args) > 2 else kwargs.get('body'))
                 try:
                     return await original(url, *args, **kwargs)
                 except ccxt.BaseError as error:
@@ -58,6 +63,8 @@ class DemoBinance(Binance):
         else:
             def fetch(url, *args, **kwargs):
                 check_url(url)
+                guard_order_wire(self, url, args[0] if args else kwargs.get('method', 'GET'),
+                                 args[2] if len(args) > 2 else kwargs.get('body'))
                 try:
                     return original(url, *args, **kwargs)
                 except ccxt.BaseError as error:
@@ -65,21 +72,31 @@ class DemoBinance(Binance):
         api.fetch = fetch
         return api
 
-def read_credentials():
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-File", str(ROOT / "scripts/read-demo-secret.ps1"),
-        "-CredentialFile", str(ROOT / "local/demo/credentials.dpapi.json")],
-        capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
-    if result.returncode:
-        raise ValueError("DEMO_CREDENTIALS_UNAVAILABLE: run configure-demo.ps1 locally")
+def read_credentials(stdin=False):
     try:
-        value = json.loads(result.stdout)
+        if stdin:
+            value = json.loads(sys.stdin.readline())
+        else:
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts/read-demo-secret.ps1"),
+                "-CredentialFile", str(ROOT / "local/demo/credentials.dpapi.json")],
+                capture_output=True, text=True, timeout=20)
+            if result.returncode:
+                raise ValueError("DEMO_CREDENTIALS_UNAVAILABLE: run configure-demo.ps1 locally")
+            value = json.loads(result.stdout)
         if any(not isinstance(value.get(k), str) or len(value[k]) < 16 for k in ("key", "secret")):
             raise ValueError()
         return value
+    except ValueError as error:
+        if str(error).startswith("DEMO_CREDENTIALS_"):
+            raise
+        raise ValueError("DEMO_CREDENTIALS_INVALID") from None
     except Exception:
         raise ValueError("DEMO_CREDENTIALS_INVALID") from None
 
 def validate_config(config):
+    reserve = config.get('amount_reserve_percent', 0.05)
+    if type(reserve) not in (int, float) or reserve != 0.05:
+        raise ValueError('DEMO_AMOUNT_RESERVE_REJECTED')
     if (config.get("dry_run") is not False or config.get("trading_mode") != "spot"
         or config.get("bot_name") != "binance-trade-demo" or config.get("strategy") != "CodexDemoSpot"
         or config.get("exchange", {}).get("name") != "binance"
@@ -92,6 +109,9 @@ def install_adapter(credentials):
     class AuthenticatedDemoBinance(DemoBinance):
         def __init__(self, config, **kwargs):
             validate_config(config)
+            # Keep the bridge's minimum-stake calculation identical to native Freqtrade.
+            config['amount_reserve_percent'] = 0.05
+            pin_demo_exit_config(config)
             config["exchange"]["key"] = credentials["key"]
             config["exchange"]["secret"] = credentials["secret"]
             # Disable unsupported services, proxies, websocket and config URL overrides.
@@ -106,14 +126,15 @@ def install_adapter(credentials):
             kwargs['exchange_config'] = None
             super().__init__(config, **kwargs)
     exchanges.Binance = AuthenticatedDemoBinance
+    return AuthenticatedDemoBinance
 
 def main():
     # Arguments are fixed by the launcher; no arbitrary Freqtrade subcommands/config.
-    if len(sys.argv) != 1:
+    if sys.argv[1:] not in ([], ["--credentials-stdin"]):
         raise ValueError("DEMO_ARGUMENTS_REJECTED")
     config_path = ROOT / "local/demo/freqtrade/config.json"
     validate_config(json.loads(config_path.read_text(encoding="utf-8-sig")))
-    credentials = read_credentials()
+    credentials = read_credentials(stdin=sys.argv[1:] == ["--credentials-stdin"])
     protect_transports()
     install_adapter(credentials)
     # Prevent any dependency logger from emitting actual credentials/signatures.
@@ -128,6 +149,8 @@ def main():
         record.args = ()
         return record
     logging.setLogRecordFactory(factory)
+    from demo_rpc_sessions import install_rpc_session_cleanup
+    install_rpc_session_cleanup()
     from freqtrade.main import main as freqtrade_main
     directory = ROOT / "local/demo/freqtrade"
     freqtrade_main(["trade", "--config", str(config_path), "--userdir", str(directory),

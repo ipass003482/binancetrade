@@ -12,6 +12,9 @@ import freqtrade.exchange as exchanges
 from freqtrade.exchange.binance import Binance
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from demo_protection import GuardedDemoStops, pin_demo_exit_config
+from demo_model_guard import guard_order_wire
 DIRECTORY = ROOT / 'local/demo-futures'
 PAIRS = [name + '/USDT:USDT' for name in ('BTC', 'ETH', 'SOL', 'BNB')]
 
@@ -39,13 +42,16 @@ def protect_transports():
     aiohttp.ClientSession._request = request
 
 def validate_config(config):
+    reserve = config.get('amount_reserve_percent', 0.05)
+    if type(reserve) not in (int, float) or reserve != 0.05:
+        raise ValueError('FUTURES_DEMO_AMOUNT_RESERVE_REJECTED')
     exchange = config.get('exchange', {})
     api = config.get('api_server', {})
     if (config.get('dry_run') is not False or config.get('trading_mode') != 'futures'
         or config.get('margin_mode') != 'isolated' or config.get('bot_name') != 'binance-trade-demo-futures'
         or config.get('strategy') != 'CodexDemoFutures' or exchange.get('name') != 'binance'
         or exchange.get('demo_trading') is not True or exchange.get('pair_whitelist') != PAIRS
-        or config.get('stake_amount') != 50 or config.get('max_open_trades') != 2
+        or config.get('stake_amount') != 150 or config.get('max_open_trades') != 1
         or not -0.02 <= config.get('stoploss', 0) < 0 or config.get('position_adjustment_enable') is not False
         or config.get('force_entry_enable') is not True or config.get('stake_currency') != 'USDT'
         or api.get('listen_ip_address') != '127.0.0.1' or api.get('listen_port') != 18084):
@@ -53,9 +59,15 @@ def validate_config(config):
     if exchange.get('key') or exchange.get('secret'):
         raise ValueError('PLAINTEXT_CREDENTIALS_REJECTED')
 
-class DemoFuturesBinance(Binance):
+class DemoFuturesBinance(GuardedDemoStops, Binance):
     demo_futures_destination_guard = True
     _ft_has = {**Binance._ft_has, 'supports_demo_trading': True, 'has_delisting': False, 'ws_enabled': False}
+
+    def additional_exchange_init(self):
+        # Binance account checks happen before load_markets can synchronize time.
+        # Only adjust this client's signed timestamps, never the system clock.
+        self._api.load_time_difference()
+        return super().additional_exchange_init()
 
     def _init_ccxt(self, exchange_config, sync, ccxt_kwargs):
         if exchange_config.get('demo_trading') is not True:
@@ -67,6 +79,8 @@ class DemoFuturesBinance(Binance):
         if inspect.iscoroutinefunction(original):
             async def fetch(url, *args, **kwargs):
                 check_url(url)
+                guard_order_wire(self, url, args[0] if args else kwargs.get('method', 'GET'),
+                                 args[2] if len(args) > 2 else kwargs.get('body'))
                 try:
                     return await original(url, *args, **kwargs)
                 except ccxt.BaseError as error:
@@ -74,6 +88,8 @@ class DemoFuturesBinance(Binance):
         else:
             def fetch(url, *args, **kwargs):
                 check_url(url)
+                guard_order_wire(self, url, args[0] if args else kwargs.get('method', 'GET'),
+                                 args[2] if len(args) > 2 else kwargs.get('body'))
                 try:
                     return original(url, *args, **kwargs)
                 except ccxt.BaseError as error:
@@ -82,7 +98,7 @@ class DemoFuturesBinance(Binance):
         return api
 
     def _lev_prep(self, pair, leverage, side, accept_fail=False):
-        if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or not 1 <= leverage <= 3:
+        if not isinstance(leverage, (int, float)) or not math.isfinite(leverage) or leverage != 1:
             raise ccxt.PermissionDenied('FUTURES_LEVERAGE_LIMIT')
         if self.margin_mode != 'isolated':
             raise ccxt.PermissionDenied('FUTURES_ISOLATED_REQUIRED')
@@ -93,23 +109,30 @@ class DemoFuturesBinance(Binance):
             raise ccxt.PermissionDenied('FUTURES_ORDER_IDENTITY_REJECTED')
         if not reduceOnly:
             if (not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (amount, rate, leverage))
-                or leverage > 3 or leverage < 1 or amount * rate > 150 + 1e-8
-                or amount * rate / leverage > 50 + 1e-8):
+                or leverage != 1 or amount * rate > 150 + 1e-8
+                or amount * rate / leverage > 150 + 1e-8):
                 raise ccxt.PermissionDenied('FUTURES_ENTRY_LIMIT')
         return super().create_order(pair=pair, ordertype=ordertype, side=side, amount=amount,
             rate=rate, leverage=leverage, reduceOnly=reduceOnly, **kwargs)
 
-def read_credentials():
-    result = subprocess.run(['powershell.exe', '-NoProfile', '-File', str(ROOT / 'scripts/read-demo-secret.ps1'),
-        '-CredentialFile', str(DIRECTORY / 'credentials.dpapi.json')], capture_output=True, text=True,
-        timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
-    if result.returncode:
-        raise ValueError('FUTURES_DEMO_CREDENTIALS_UNAVAILABLE')
+def read_credentials(stdin=False):
     try:
-        value = json.loads(result.stdout)
+        if stdin:
+            value = json.loads(sys.stdin.readline())
+        else:
+            result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(ROOT / 'scripts/read-demo-secret.ps1'),
+                '-CredentialFile', str(DIRECTORY / 'credentials.dpapi.json')], capture_output=True, text=True,
+                timeout=20)
+            if result.returncode:
+                raise ValueError('FUTURES_DEMO_CREDENTIALS_UNAVAILABLE')
+            value = json.loads(result.stdout)
         if any(not isinstance(value.get(k), str) or len(value[k]) < 16 for k in ('key', 'secret')):
             raise ValueError()
         return {k: value[k] for k in ('key', 'secret')}
+    except ValueError as error:
+        if str(error).startswith('FUTURES_DEMO_CREDENTIALS_'):
+            raise
+        raise ValueError('FUTURES_DEMO_CREDENTIALS_INVALID') from None
     except Exception:
         raise ValueError('FUTURES_DEMO_CREDENTIALS_INVALID') from None
 
@@ -117,6 +140,9 @@ def install_adapter(credentials):
     class AuthenticatedDemoFutures(DemoFuturesBinance):
         def __init__(self, config, **kwargs):
             validate_config(config)
+            # Keep the bridge's minimum-stake calculation identical to native Freqtrade.
+            config['amount_reserve_percent'] = 0.05
+            pin_demo_exit_config(config, futures=True)
             config['exchange'] = {'name': 'binance', **credentials, 'demo_trading': True, 'enable_ws': False,
                 'pair_whitelist': PAIRS, 'pair_blacklist': [], 'ccxt_config': {'enableRateLimit': True,
                 'options': {'defaultType': 'future', 'fetchMarkets': {'types': ['linear']},
@@ -127,12 +153,12 @@ def install_adapter(credentials):
     return AuthenticatedDemoFutures
 
 def main():
-    if sys.argv[1:] not in ([], ['--check']):
+    if sys.argv[1:] not in ([], ['--check'], ['--credentials-stdin'], ['--credentials-stdin', '--check']):
         raise ValueError('FUTURES_DEMO_ARGUMENTS_REJECTED')
     config_path = DIRECTORY / 'freqtrade/config.json'
     config = json.loads(config_path.read_text(encoding='utf-8-sig'))
     validate_config(config)
-    credentials = read_credentials()
+    credentials = read_credentials(stdin='--credentials-stdin' in sys.argv[1:])
     old_factory = logging.getLogRecordFactory()
     def factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
@@ -146,7 +172,7 @@ def main():
     logging.setLogRecordFactory(factory)
     protect_transports()
     adapter = install_adapter(credentials)
-    if sys.argv[1:] == ['--check']:
+    if '--check' in sys.argv[1:]:
         from freqtrade.enums import RunMode
         config['runmode'] = RunMode.LIVE
         exchange = adapter(config, validate=False)
@@ -157,11 +183,13 @@ def main():
             orders = [order for pair in PAIRS for order in exchange._api.fetch_open_orders(pair)]
             balance = exchange._api.fetch_balance()
             print(json.dumps({'mode': 'demo-futures', 'status': 'connected', 'marginMode': 'isolated',
-                'maxLeverage': 3, 'openPositions': sum(float(p.get('contracts') or 0) != 0 for p in positions),
+                'maxLeverage': 1, 'openPositions': sum(float(p.get('contracts') or 0) != 0 for p in positions),
                 'openOrders': len(orders), 'freeUsdt': balance.get('USDT', {}).get('free')}))
         finally:
             exchange.close()
         return
+    from demo_rpc_sessions import install_rpc_session_cleanup
+    install_rpc_session_cleanup()
     from freqtrade.main import main as freqtrade_main
     directory = DIRECTORY / 'freqtrade'
     freqtrade_main(['trade', '--config', str(config_path), '--userdir', str(directory),

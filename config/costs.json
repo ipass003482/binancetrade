@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "maxAgeSeconds": 300,
+  "slippageBpsPerSide": 5,
+  "priceSpaceBufferBps": 30,
+  "fundingReserveEvents": 1
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "model": "kronos-small-pretrained-v1",
+  "executionRole": "advisory",
+  "modes": ["demo", "demo-futures"],
+  "timeframe": "5m",
+  "historyBars": 96,
+  "labelHorizonBars": 3,
+  "maxPredictionAgeSeconds": 60,
+  "device": "cpu",
+  "threads": 2,
+  "sampleCount": 4,
+  "temperature": 1.0,
+  "topP": 0.9,
+  "seed": 2914,
+  "reviewWindows": 100,
+  "minimumReviewWindows": 30,
+  "note": "Official frozen pretrained weights. Inference only, no fine-tuning. Review threshold is a diagnostic sample floor, not statistical proof of alpha or an entry-count cap. No model order authority."
+}

@@ -3,15 +3,16 @@ import assert from 'node:assert/strict';
 import { collect,market } from '../src/research.mjs';
 import { technicalSummary,ResearchSchema } from '../src/research-profile.mjs';
 import { loadPolicy } from '../src/config.mjs';
-function bars(){
- const end=Math.floor(Date.now()/900000)*900000;
- return Array.from({length:32},(_,i)=>[end-(32-i)*900000,'100','102','99','101','10',end-(31-i)*900000-1]);
+function bars(timeframe='15m'){
+ const ms=timeframe==='5m'?300000:900000,n=timeframe==='5m'?96:32,end=Math.floor(Date.now()/ms)*ms;
+ return Array.from({length:n},(_,i)=>[end-(n-i)*ms,'100','102','99','101','10',end-(n-1-i)*ms-1]);
 }
 function fetchMock(url){
  const u=new URL(url),symbol=u.searchParams.get('symbol')??'BTCUSDT';
+ if(u.pathname.endsWith('/time'))return Promise.resolve(new Response(JSON.stringify({serverTime:Date.now()})));
  return Promise.resolve(new Response(JSON.stringify(u.pathname.endsWith('exchangeInfo')
   ?{symbols:[{symbol,baseAsset:symbol.slice(0,-4),quoteAsset:'USDT',status:'TRADING',isSpotTradingAllowed:true}]}
-  :u.pathname.endsWith('bookTicker')?{symbol,bidPrice:'100',askPrice:'100.01'}:bars())));
+  :u.pathname.endsWith('bookTicker')?{symbol,bidPrice:'100',askPrice:'100.01'}:bars(u.searchParams.get('interval')??'15m'))));
 }
 test('Demo collector uses only Demo market URLs and produces closed-candle summaries',async()=>{
  const p=await loadPolicy('demo'),hosts=[];
@@ -19,7 +20,7 @@ test('Demo collector uses only Demo market URLs and produces closed-candle summa
  assert.ok(hosts.every(h=>h==='demo-api.binance.com'));
  assert.equal(snapshot.mode,'demo');
  assert.equal(snapshot.evidence.filter(e=>e.id.startsWith('technical:')).length,p.pairs.length);
- const m=snapshot.markets[0];assert.equal(technicalSummary(m.candles).sma20,'101');
+ const m=snapshot.markets[0];assert.equal(technicalSummary(m.candles,m.timeframe).sma20,'101');
 });
 test('bad or discontinuous OHLCV does not create misleading indicators',()=>{
  const candles=bars().map(b=>({openTime:b[0],open:b[1],high:b[2],low:b[3],close:b[4],volume:b[5],closeTime:b[6]}));

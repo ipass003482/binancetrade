@@ -82,12 +82,14 @@ test('successful HOLD resets failure count; aborted research cannot submit',asyn
  await assert.rejects(runCycle({...opts,signal:ctrl.signal,executeFn:async()=>{submits++;}}),/ABORTED/);
  assert.equal(submits,0);
 });
-test('report preserves fee currencies and does not subtract fees twice',()=>{
- const trades=[{trade_id:1,is_open:false,profit_abs:'0.1',close_timestamp:1,fee_open_cost:'0.01',fee_open_currency:'USDT',fee_close_cost:'0.001',fee_close_currency:'BNB'},
+test('report uses quote-cost units even for BNB commissions and does not subtract fees twice',()=>{
+ const trades=[{trade_id:1,pair:'BTC/USDT',is_open:false,profit_abs:'0.1',close_timestamp:1,fee_open_cost:'0.01',fee_open_currency:'USDT',fee_close_cost:'0.001',fee_close_currency:'BNB'},
  {trade_id:2,is_open:false,profit_abs:'-0.3',close_timestamp:2}];
  const r=summarizeTrades(trades);
  assert.equal(r.netRealizedUsdt,'-0.2');assert.equal(r.closedTradeDrawdownUsdt,'0.3');
- assert.equal(r.winRate,0.5);assert.deepEqual(r.feesByCurrency,{USDT:'0.01',BNB:'0.001'});
+ assert.equal(r.winRate,0.5);assert.deepEqual(r.engineFeesByQuoteCurrency,{USDT:'0.011'});
+ assert.equal(r.originalCommissionsByCurrency,null);
+ assert.deepEqual(summarizeTrades([{is_open:true,fee_open_cost:1,fee_open_currency:'BNB'}]).engineFeesByQuoteCurrency,{});
  assert.equal(summarizeTrades([{is_open:false,profit_abs:null}]).netRealizedUsdt,null);
 });
 test('offline report labels cached positions stale and escapes model Markdown',async()=>{

@@ -45,7 +45,10 @@ An expired pre-send deadline is recorded rejected, not unknown.
 
 Codex runs with isolated research cwd, read-only sandbox, disabled shell tools and a
 sanitized environment. It receives evidence and position summaries, never broker credentials.
-Spot proposes hold/buy/sell. Demo futures proposes hold/open-long/open-short/close-long/close-short,
+Spot proposes hold/buy/sell. On the current Binance Spot Demo route, a bearish spot hypothesis is
+review-only and must return HOLD with `SPOT_SHORT_REQUIRES_MARGIN`; a spot `sell` closes an existing
+long and is not a naked short. Actual spot shorting would require a separately verified Margin
+execution boundary, which is not exposed by this project's Demo Spot `/api/` transport. Demo futures proposes hold/open-long/open-short/close-long/close-short,
 with an integer leverage field (1–3). Closing never opens the opposite side.
 No autonomous strategy-code changes are accepted.
 
@@ -141,7 +144,7 @@ Preview data is frontend-only and explicitly labelled. Price landscape lines are
 
 ## Analyst style and audit
 
-`config/analyst.json` selects `active` (default) or `conservative` on the next analysis. Review the full style text in `prompts/analyst-active.md` and `prompts/analyst-conservative.md` for spot, or their `analyst-futures-*` counterparts for perpetuals. The host contract in `src/analyst.mjs` adds the allowed mode, fixed stake, risk limits, selected account fields and untrusted market snapshot. The native Codex process remains research-only and returns the existing proposal schema.
+`config/analyst.json` selects `active` (default) or `conservative` on the next analysis. Prompt v14 reviews the full style text in `prompts/analyst-active.md` and `prompts/analyst-conservative.md` for spot, or their `analyst-futures-*` counterparts for perpetuals. The host contract in `src/analyst.mjs` adds the allowed mode, capability-driven direction matrix, fixed stake, risk limits, selected account fields and explicitly delimited untrusted market snapshot. It also separates entry-only cost requirements from evidence needed to review a justified native exit. The native Codex process remains research-only and returns the existing proposal schema.
 
 Active may propose an entry with a clear price structure and at least one supporting volume or momentum observation, despite secondary disagreement. Conservative asks for stronger agreement. Neither style imposes a trade quota, guarantees performance, changes deterministic bridge checks or permits real-money trading. Missing/invalid required evidence still blocks a trade; optional unavailable Web3 context is not automatically a blocker or positive evidence.
 

@@ -1,6 +1,5 @@
-# Active plans
-- [Demo, operations, reports and research](plans/demo-operations.md)
+# 現行計畫
 
-- [Trading dashboard](plans/trading-dashboard.md) — modern Research Desk and connection flow; awaiting visual acceptance.
-- [Active analyst](plans/active-analyst.md) — prompt profiles and provenance; awaiting prompt acceptance.
-- [Demo futures](plans/demo-futures.md) — isolated 3x perpetuals for BTC/ETH/SOL/BNB.
+只保留一份現行規劃：[v12 Demo 策略與持續驗證](plans/current-v12.md)。其中目前提示詞已升為 v14；檔名保留以維持唯一現行 plan。
+
+更新與移除舊 plan 的規則寫在該計畫中；歷史交易證據不屬於待移除的規劃文件。

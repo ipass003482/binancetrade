@@ -12,9 +12,11 @@ export class DashboardStore extends EventTarget {
   const get=async path=>{const response=await this.fetch(path,{signal:this.controller.signal});if(!response.ok)throw new Error('READ_FAILED');return response.json();};
   const apply=value=>{if(version===this.version)this.publish(value);};
   await Promise.all([
-   get('/api/dashboard?mode='+encodeURIComponent(mode)).then(data=>apply({data})).catch(e=>{if(e.name!=='AbortError')apply({error:'工作區資料讀取失敗，請確認 UI 服務仍在執行。'});}),
+   get('/api/dashboard?mode='+encodeURIComponent(mode)).then(data=>apply({data,dataReceivedMono:performance.now()})).catch(e=>{if(e.name!=='AbortError')apply({error:'工作區資料讀取失敗，請確認 UI 服務仍在執行。'});}),
    get('/api/market?mode='+encodeURIComponent(mode)+'&pair='+encodeURIComponent(pair)).then(market=>apply({market})).catch(e=>{if(e.name!=='AbortError')apply({marketError:'行情目前無法取得，請稍後更新。'});})
   ]);
+  const allowed=this.state.data?.policy?.pairs;
+  if(version===this.version&&allowed?.length&&!allowed.includes(this.state.pair))return this.refresh({pair:allowed[0]});
   apply({loading:false});
  }
 }

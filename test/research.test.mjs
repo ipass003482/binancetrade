@@ -16,7 +16,7 @@ test('HTTP 200 business error is not usable market data',async()=>{
  await assert.rejects(jsonFetch('https://example.invalid',{fetchImpl:async()=>new Response('{"success":false,"code":"100"}')}),/UPSTREAM/);
 });
 test('CEX identity checks full symbol and trading status',async()=>{
- const mock=async(url)=>new Response(JSON.stringify(String(url).includes('exchangeInfo')
+ const mock=async(url)=>new Response(JSON.stringify(String(url).endsWith('/time')?{serverTime:Date.now()}:String(url).includes('exchangeInfo')
   ?{symbols:[{symbol:'BTCUSDT',baseAsset:'FAKE',quoteAsset:'USDT',status:'TRADING',isSpotTradingAllowed:true}]}
   :String(url).includes('bookTicker')?{bidPrice:'1',askPrice:'1.1'}:[]));
  await assert.rejects(market('BTC/USDT',{fetchImpl:mock}),/NOT_A_VERIFIED/);

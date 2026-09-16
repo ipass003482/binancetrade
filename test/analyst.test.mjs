@@ -3,18 +3,27 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildAnalystPrompt,accountContext,loadAnalyst } from '../src/analyst.mjs';
+import { buildAnalystPrompt,accountContext,loadAnalyst,PROMPT_VERSION } from '../src/analyst.mjs';
 import { readJson } from '../src/io.mjs';
 import { runCycle } from '../src/workflow.mjs';
 import { fixture } from './fixtures.mjs';
 
 test('analyst accepts only supported profiles and matching simulation modes',async()=>{
  const f=await fixture();assert.equal((await loadAnalyst()).style,'active');
+ assert.equal(PROMPT_VERSION,14);
  for(const style of ['active','conservative']){
   const r=await buildAnalystPrompt({...f,analyst:{version:1,style}});
   assert.equal(r.metadata.style,style);
   assert.ok(r.prompt.includes('"buyStakeUsdt":"50"'));
   assert.ok(r.prompt.includes('No leverage, shorting, pyramiding'));
+  assert.ok(r.prompt.includes('SPOT_SHORT_REQUIRES_MARGIN'));
+  assert.ok(r.prompt.includes('50 fills per mode is a measurement target'));
+  assert.ok(r.prompt.includes('live-flow-adaptive-v2'));
+  assert.ok(r.prompt.includes('Apply these sources in order'));
+  assert.ok(r.prompt.includes('ruleReference.proposal.action'));
+  assert.ok(r.prompt.includes('BEGIN_UNTRUSTED_SNAPSHOT_DATA'));
+  assert.ok(r.prompt.includes('adaptiveParameters'));
+  assert.match(r.prompt,/no Markdown or extra keys/);
  }
  await assert.rejects(buildAnalystPrompt({...f,analyst:{version:1,style:'../../secret'}}));
  await assert.rejects(buildAnalystPrompt({...f,policy:{...f.policy,mode:'live'}}),/MODE_REJECTED/);
