@@ -10,7 +10,7 @@ import { fixture } from './fixtures.mjs';
 
 test('analyst accepts only supported profiles and matching simulation modes',async()=>{
  const f=await fixture();assert.equal((await loadAnalyst()).style,'active');
- assert.equal(PROMPT_VERSION,14);
+ assert.equal(PROMPT_VERSION,15);
  for(const style of ['active','conservative']){
   const r=await buildAnalystPrompt({...f,analyst:{version:1,style}});
   assert.equal(r.metadata.style,style);
