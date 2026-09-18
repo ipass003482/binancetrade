@@ -60,9 +60,10 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
     signalExpiresAt:new Date(Math.min(clockLower+policy.maxSignalAgeSeconds*1000,
      decision?.deadline??(Number.isSafeInteger(boundary)?boundary+timeframeSpec(snapshot.timeframe).ms:Infinity))).toISOString()};
    await healthUpdate(local,{stage:'analyzing',snapshotId:snapshot.id,timing});
+   const recentHistory=useRules&&typeof client.history==='function'?await client.history():[];
    const modelEvidence=useRules?{status:'observation_only',entryAllowed:null,usedForEntryDecision:false,reason:'ORDER_FLOW_ONLY_NO_MODEL_WAIT'}:undefined;
    if(useRules)await writeJson(join(local,'runs',snapshot.id+'.model-decision.json'),modelEvidence);
-   const reference=rulesProposal(snapshot,policy,account,modelEvidence);
+   const reference=rulesProposal(snapshot,policy,account,modelEvidence,{recentHistory,now:Date.parse(snapshot.completedAt??snapshot.createdAt)});
    await writeJson(join(local,'runs',snapshot.id+'.rules.json'),reference);
    if(useRules&&policy.mode==='demo')enqueueInitialSpotCandidates(local,{snapshot,reference,policy,account,strategyVersion:version,now:Date.now()});
    if(useRules){

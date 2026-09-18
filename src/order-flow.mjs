@@ -8,6 +8,25 @@ export const SPOT_FLOW_EXIT_POLICY=Object.freeze({version:'rolling-opposite-flow
 export const SPOT_FLOW_CONTINUATION_VERSION='flow-price-continuation-v1';
 export const FLOW_POLICY='trend-pullback-flow-v1';
 export const FLOW_VERSION='sampled-demo-flow-v1';
+// A negative Demo fill is evidence that the immediately sampled direction
+// failed for that pair. Block only that pair for a short, bounded period;
+// other pairs remain eligible and this is not a profitability claim.
+export const FLOW_LOSS_COOLDOWN_VERSION='flow-loss-cooldown-v1';
+export const FLOW_LOSS_COOLDOWN_MS=10*60*1000;
+export function recentLossCooldowns(history,{now=Date.now(),cooldownMs=FLOW_LOSS_COOLDOWN_MS}={}){
+ const result=new Map();
+ if(!Array.isArray(history)||!Number.isSafeInteger(now)||!Number.isFinite(cooldownMs)||cooldownMs<=0)return result;
+ for(const trade of history){
+  if(!trade||trade.is_open!==false||typeof trade.pair!=='string'||!trade.pair)continue;
+  const net=Number(trade.profit_abs),closed=Number(trade.close_timestamp);
+  if(!Number.isFinite(net)||net>=0||!Number.isSafeInteger(closed))continue;
+  const age=now-closed;
+  if(age<0||age>=cooldownMs)continue;
+  const prior=result.get(trade.pair);
+  if(!prior||closed>prior.closedAt)result.set(trade.pair,{pair:trade.pair,closedAt:closed,ageMs:age,profitAbs:net,tradeId:trade.trade_id??null});
+ }
+ return result;
+}
 // Bounded selectivity for the live minute route. These filters remove
 // direction that is only a rounding tick or an unusually one-sided book;
 // they are an observed Demo hypothesis, not a forecast or profit claim.
