@@ -8,6 +8,10 @@ export const SPOT_FLOW_EXIT_POLICY=Object.freeze({version:'rolling-opposite-flow
 export const SPOT_FLOW_CONTINUATION_VERSION='flow-price-continuation-v1';
 export const FLOW_POLICY='trend-pullback-flow-v1';
 export const FLOW_VERSION='sampled-demo-flow-v1';
+// Bounded selectivity for the live minute route. These filters remove
+// direction that is only a rounding tick or an unusually one-sided book;
+// they are an observed Demo hypothesis, not a forecast or profit claim.
+export const FLOW_SELECTIVITY=Object.freeze({version:'flow-selectivity-v1',minimumMidChangeBps:'0.5',maximumDepthImbalance:'0.3'});
 export const FLOW_MAX_AGE_MS=45000;
 const fail=reason=>({status:'unavailable',eligible:false,reason});
 const positive=v=>{if(!['string','number'].includes(typeof v))throw Error();const x=new Decimal(v);if(!x.isFinite()||x.lte(0)||Math.abs(x.e)>50)throw Error();return x;};
@@ -27,10 +31,13 @@ export function assessSpotFlowContinuation(proof,quote){
 // Ten-second depth samples are not a full event-by-event order book or OFI.
 // 55% taker notional, persistent depth support and favorable mid-price change
 // form one prospective hypothesis; thresholds are not fitted win probabilities.
-export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55'}){
+export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55',minMidChangeBps='0',maxDepthImbalance='1'}={}){
  try{
   const minimum=new Decimal(minTakerShare);
-  if(!['string','number'].includes(typeof minTakerShare)||!minimum.isFinite()||minimum.lt('.55')||minimum.gt('.60'))return fail('FLOW_THRESHOLD_INVALID');
+  const minimumMove=new Decimal(minMidChangeBps),maximumDepth=new Decimal(maxDepthImbalance);
+  if(!['string','number'].includes(typeof minTakerShare)||!minimum.isFinite()||minimum.lt('.55')||minimum.gt('.60')
+   ||!['string','number'].includes(typeof minMidChangeBps)||!minimumMove.isFinite()||minimumMove.lt(0)||minimumMove.gt(100)
+   ||!['string','number'].includes(typeof maxDepthImbalance)||!maximumDepth.isFinite()||maximumDepth.lte(0)||maximumDepth.gt(1))return fail('FLOW_THRESHOLD_INVALID');
   if(!proof||proof.version!==FLOW_VERSION||proof.mode!==mode||proof.pair!==pair||typeof long!=='boolean'||!Number.isSafeInteger(now))return fail('FLOW_IDENTITY');
   const source=mode==='demo'?'https://demo-api.binance.com':mode==='demo-futures'?'https://demo-fapi.binance.com':null;
   if(!source||proof.source!==source)return fail('FLOW_SOURCE');
@@ -61,8 +68,10 @@ export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55'}){
   if(endTime-trades.at(-1).T>15000)return fail('FLOW_TAPE_STALE');
   const directional=long?buy:sell,total=buy.plus(sell),share=directional.div(total);
   const depth=imbalances.every(v=>long?v.gt(0):v.lt(0));
-  const movement=long?mids[2].gt(mids[0]):mids[2].lt(mids[0]);
-  const eligible=directional.gte(total.mul(minimum))&&depth&&movement;
-  return {status:'ok',eligible,reason:eligible?null:'FLOW_NOT_ALIGNED',takerShare:share.toFixed(),minimumTakerShare:minimum.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),midChangeBps:mids[2].div(mids[0]).minus(1).mul(10000).toFixed(),sampledAt:latest};
+  const depthWithinBounds=imbalances.every(v=>v.abs().lte(maximumDepth));
+  const midChangeBps=mids[2].div(mids[0]).minus(1).mul(10000);
+  const movement=long?midChangeBps.gte(minimumMove):midChangeBps.lte(minimumMove.neg());
+  const eligible=directional.gte(total.mul(minimum))&&depth&&depthWithinBounds&&movement;
+  return {status:'ok',eligible,reason:eligible?null:'FLOW_NOT_ALIGNED',takerShare:share.toFixed(),minimumTakerShare:minimum.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),midChangeBps:midChangeBps.toFixed(),minimumMidChangeBps:minimumMove.toFixed(),maximumDepthImbalance:maximumDepth.toFixed(),depthWithinBounds,sampledAt:latest};
  }catch{return fail('FLOW_DATA_INVALID');}
 }

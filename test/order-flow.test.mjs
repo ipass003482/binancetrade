@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {assessOrderFlow,assessSpotFlowContinuation,FLOW_VERSION} from '../src/order-flow.mjs';
+import {assessOrderFlow,assessSpotFlowContinuation,FLOW_SELECTIVITY,FLOW_VERSION} from '../src/order-flow.mjs';
 import {sampleOrderFlow} from '../src/order-flow-collector.mjs';
 import {modelRuleDecision,orderFlowRuleDecision} from '../src/demo-rules.mjs';
 const B=Date.parse('2026-09-15T00:00:00Z'),now=B+20000;
@@ -24,8 +24,8 @@ test('spot recheck cancels a reversed quote without disabling the next cycle',()
  assert.equal(future.executionQualityVersion,null);assert.equal(future.entryConfirmation.executionContinuation,undefined);
 });
 function proof(short=false,mode=short?'demo-futures':'demo'){
- const books=[-20000,-10000,0].map((delta,i)=>{const mid=100+(short?-1:1)*i*.001;
-  return {at:now+delta,updateId:i+1,bids:Array.from({length:5},(_,k)=>[String(mid-.001-k*.001),short?'1':'3']),asks:Array.from({length:5},(_,k)=>[String(mid+.001+k*.001),short?'3':'1'])};});
+ const books=[-20000,-10000,0].map((delta,i)=>{const mid=100+(short?-1:1)*i*.003;
+  return {at:now+delta,updateId:i+1,bids:Array.from({length:5},(_,k)=>[String(mid-.001-k*.001),short?'1':'1.8']),asks:Array.from({length:5},(_,k)=>[String(mid+.001+k*.001),short?'1.8':'1'])};});
  return {version:FLOW_VERSION,mode,pair:mode==='demo'?'ETH/USDT':'ETH/USDT:USDT',source:mode==='demo'?'https://demo-api.binance.com':'https://demo-fapi.binance.com',books,startTime:now-61500,endTime:now-1500,
   trades:[0,1,2].map(i=>({a:i+1,T:now-55000+i*25000,p:'100',q:'1',m:short}))};
 }
@@ -71,6 +71,15 @@ test('optional adaptive flow share only tightens the native-compatible original 
  assert.equal(assessOrderFlow(p,{...a,minTakerShare:'.57'}).eligible,false);
  assert.equal(assessOrderFlow(p,{...a,minTakerShare:'.56'}).eligible,true);
  for(const threshold of ['.54','.61','NaN',null])assert.equal(assessOrderFlow(p,{...a,minTakerShare:threshold}).eligible,false);
+});
+
+test('live selectivity rejects weak mid movement and extreme depth while retaining bounded flow',()=>{
+ const p=proof(),a={mode:p.mode,pair:p.pair,long:true,now,minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance};
+ assert.equal(assessOrderFlow(p,a).eligible,true);
+ const weak=structuredClone(p);for(const [i,b] of weak.books.entries()){const mid=100+i*.001;b.bids[0][0]=String(mid-.001);b.asks[0][0]=String(mid+.001);}
+ assert.equal(assessOrderFlow(weak,a).eligible,false);
+ const extreme=structuredClone(p);for(const b of extreme.books){for(const row of b.bids)row[1]='4';for(const row of b.asks)row[1]='1';}
+ assert.equal(assessOrderFlow(extreme,a).eligible,false);
 });
 
 test('one-minute flow decisions retain closed5m ATR, adapt entry inputs and reject expired minute evidence',()=>{

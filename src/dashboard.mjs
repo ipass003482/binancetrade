@@ -16,7 +16,7 @@ import { readEntryDiagnostics } from './entry-diagnostics.mjs';
 import {readTodayPnl} from './today-pnl.mjs';
 import {readStrategyReview} from './strategy-review.mjs';
 import {readCapitalView,startCapitalObserver} from './capital-flow-store.mjs';
-import {readDemoSession,validateDemoSession,sessionTrades} from './demo-session.mjs';
+import {readDemoSession,readActiveDemoScope,validateDemoSession,sessionTrades} from './demo-session.mjs';
 
 export async function readEngine(client,{snapshot:providedSnapshot,session=null}={}) {
  const snapshot=providedSnapshot??await client.snapshot();
@@ -161,7 +161,7 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
 }
 const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs']]);
 const types={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',mjs:'text/javascript; charset=utf-8'};
-export function createDashboardServer({port=18100,state=dashboardState,quote=market,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession}={}) {
+export function createDashboardServer({port=18100,state=dashboardState,quote=market,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope}={}) {
  const inflight=new Map(),cache=new Map();
  async function cached(key,fn,ttl) {
   const old=cache.get(key);if(old&&Date.now()-old.at<ttl)return old.value;
@@ -176,13 +176,20 @@ export function createDashboardServer({port=18100,state=dashboardState,quote=mar
   try {
    const url=new URL(req.url,'http://'+host);
    const session=['/api/today-pnl','/api/strategy-review'].includes(url.pathname)||url.pathname==='/api/dashboard'&&isDemo(url.searchParams.get('mode')??'dry-run')?await readSession():null;
-   const epoch=session?session.id+':'+session.startedAt:'legacy';
-   if(url.pathname==='/api/today-pnl')return send(200,await cached('today:'+epoch,()=>today({session}),0));
-   if(url.pathname==='/api/strategy-review')return send(200,await cached('strategy:'+epoch,()=>strategy({session}),15000));
+   // Keep the execution/dashboard session authoritative while allowing the
+   // PnL card to start a fresh, explicitly archived reporting scope. Tests and
+   // callers that inject a session reader retain the legacy behavior.
+   const activeScope=readSession===readDemoSession&&(
+    url.pathname==='/api/today-pnl'||url.pathname==='/api/strategy-review'||url.pathname==='/api/dashboard'&&isDemo(url.searchParams.get('mode')??'dry-run'))
+    ?await readTodayScope():null;
+   const reportingSession=activeScope?.session??session;
+   const epoch=reportingSession?reportingSession.id+':'+reportingSession.startedAt:'legacy';
+   if(url.pathname==='/api/today-pnl')return send(200,await cached('today:'+(reportingSession?reportingSession.id+':'+reportingSession.startedAt:epoch),()=>today({session:reportingSession,goal:activeScope?.goal??null}),0));
+   if(url.pathname==='/api/strategy-review')return send(200,await cached('strategy:'+epoch,()=>strategy({session:reportingSession}),15000));
    if(url.pathname==='/api/capital-flow')return send(200,await cached('capital',capital,0));
    if(assets.has(url.pathname)){const name=assets.get(url.pathname);return send(200,await readFile(join(ROOT,'ui',name)),types[name.split('.').at(-1)]);}
    const mode=url.searchParams.get('mode')??'dry-run';modeLocal(mode);
-   if(url.pathname==='/api/dashboard')return send(200,await cached('state:'+mode+':'+epoch,()=>state(mode,{session}),0));
+   if(url.pathname==='/api/dashboard')return send(200,await cached('state:'+mode+':'+epoch,()=>state(mode,{session:reportingSession}),0));
    if(url.pathname==='/api/market') {
     const pair=url.searchParams.get('pair')??'BTC/USDT';
     if(!(await loadPolicy(mode)).pairs.includes(pair))return send(400,{error:'PAIR_REJECTED'});

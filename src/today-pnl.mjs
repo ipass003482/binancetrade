@@ -37,10 +37,19 @@ export function summarizeToday(trades,{now=Date.now(),mode,session=null}={}){
    closeRate:numeric(t.is_open?t.current_rate:t.close_rate)?.toFixed()??null,netUsdt:pnl?.toFixed()??null,
    exitReason:typeof t.exit_reason==='string'?t.exit_reason:null});
  }
- return {mode,complete,outsideSessionOpenCount,...(outsideSessionOpenCount?{error:'OUTSIDE_SESSION_OPEN_POSITION'}:{}),closedCount,openCount,wins,losses,realizedUsdt:complete?realized.toFixed():null,floatingUsdt:complete?floating.toFixed():null,
+ return {mode,complete,outsideSessionOpenCount,...(outsideSessionOpenCount?{error:'OUTSIDE_SESSION_OPEN_POSITION'}:{}),closedCount,openCount,entryCount:closedCount+openCount,wins,losses,realizedUsdt:complete?realized.toFixed():null,floatingUsdt:complete?floating.toFixed():null,
   rows:rows.sort((a,b)=>Number(b.isOpen)-Number(a.isOpen)||Date.parse(b.closedAt??b.openedAt)-Date.parse(a.closedAt??a.openedAt))};
 }
-export async function readTodayPnl({now=()=>Date.now(),readSession=readDemoSession,session:providedSession,historyFor=async mode=>{
+function goalView(goal,modes){
+ if(!goal)return null;
+ const target=goal.target.count,scope=goal.target.scope;
+ const currentByMode=Object.fromEntries(modes.map(mode=>[mode.mode,mode.entryCount]));
+ const current=scope==='combined'?modes.reduce((sum,mode)=>sum+mode.entryCount,0):null;
+ const complete=scope==='combined'?current>=target:modes.every(mode=>mode.entryCount>=target);
+ return {id:goal.id,startedAt:goal.startedAt,deadline:goal.deadline??null,scope,target,
+  current,currentByMode,remaining:scope==='combined'?Math.max(0,target-current):Object.fromEntries(modes.map(mode=>[mode.mode,Math.max(0,target-mode.entryCount)])),complete};
+}
+export async function readTodayPnl({now=()=>Date.now(),readSession=readDemoSession,session:providedSession,goal=null,historyFor=async mode=>{
  const policy=await loadPolicy(mode),client=new FreqtradeClient(policy,await readJson(join(modeLocal(mode),'api-auth.json')));return client.history();
 }}={}){
  const started=now(),session=providedSession===undefined?await readSession({now:started}):providedSession;
@@ -48,9 +57,13 @@ export async function readTodayPnl({now=()=>Date.now(),readSession=readDemoSessi
  const results=await Promise.allSettled(MODES.map(async mode=>({mode,trades:await historyFor(mode)}))),observed=now();
  if(todayWindow(started).date!==todayWindow(observed).date)throw Error('DAY_CHANGED_RETRY');
  const modes=results.map((r,index)=>{if(r.status==='fulfilled'){try{return summarizeToday(r.value.trades,{mode:MODES[index],now:observed,session});}catch{}}
-  return {mode:MODES[index],complete:false,error:'當次交易紀錄不完整，請重新整理',realizedUsdt:null,floatingUsdt:null,closedCount:null,openCount:null,rows:[]};});
+  return {mode:MODES[index],complete:false,error:'當次交易紀錄不完整，請重新整理',realizedUsdt:null,floatingUsdt:null,closedCount:null,openCount:null,entryCount:null,wins:null,losses:null,rows:[]};});
  const complete=modes.every(m=>m.complete),sum=k=>complete?modes.reduce((n,m)=>n.plus(m[k]),new Decimal(0)).toFixed():null;
+ const realizedUsdt=sum('realizedUsdt'),floatingUsdt=sum('floatingUsdt'),closedCount=complete?modes.reduce((s,m)=>s+m.closedCount,0):null;
+ const openCount=complete?modes.reduce((s,m)=>s+m.openCount,0):null;
+ const wins=complete?modes.reduce((s,m)=>s+m.wins,0):null,losses=complete?modes.reduce((s,m)=>s+m.losses,0):null;
+ const currentUsdt=complete?new Decimal(realizedUsdt).plus(floatingUsdt).toFixed():null;
  return {...todayWindow(observed,session),session,observedAt:new Date(observed).toISOString(),source:'Binance Demo / Freqtrade',complete,modes,
-  realizedUsdt:sum('realizedUsdt'),floatingUsdt:sum('floatingUsdt'),closedCount:complete?modes.reduce((s,m)=>s+m.closedCount,0):null,
-  openCount:complete?modes.reduce((s,m)=>s+m.openCount,0):null};
+  goal:goalView(goal,modes),realizedUsdt,floatingUsdt,currentUsdt,closedCount,openCount,wins,losses,
+  winRate:complete&&wins+losses>0?new Decimal(wins).div(wins+losses).mul(100).toFixed(2):null};
 }

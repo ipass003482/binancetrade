@@ -1,4 +1,4 @@
-import {assessOrderFlow,FLOW_ONLY_POLICY} from './order-flow.mjs';
+import {assessOrderFlow,FLOW_ONLY_POLICY,FLOW_SELECTIVITY} from './order-flow.mjs';
 import {createHash} from 'node:crypto';
 import { isEntry,isExit, isFutures } from './mode.mjs';
 import { join } from 'node:path';
@@ -147,7 +147,7 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
      const check=()=>{
       if(Math.abs((Date.now()-wall)-(performance.now()-mono))>250)throw Error('CLOCK_JUMP_DETECTED');
       if(rulePlan?.entryPolicyVersion===FLOW_ONLY_POLICY){
-       if(Date.now()>=(decisionTiming(snapshot)?.deadline??snapshot.candleBoundary+60000)||!assessOrderFlow(rulePlan.entryConfirmation.orderFlow,{mode:policy.mode,pair:proposal.pair,long:proposal.action!=='open-short',now:Date.now(),minTakerShare:rulePlan.adaptiveParameters?.minTakerShare}).eligible)throw Error('FLOW_EXPIRED_BEFORE_SEND');
+       if(Date.now()>=(decisionTiming(snapshot)?.deadline??snapshot.candleBoundary+60000)||!assessOrderFlow(rulePlan.entryConfirmation.orderFlow,{mode:policy.mode,pair:proposal.pair,long:proposal.action!=='open-short',now:Date.now(),minTakerShare:rulePlan.adaptiveParameters?.minTakerShare,minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance}).eligible)throw Error('FLOW_EXPIRED_BEFORE_SEND');
       }
       return verifyEntryTiming({snapshot,pair:proposal.pair,mode:policy.mode,clock,now:Date.now()});
      };

@@ -5,7 +5,13 @@
 <section id="today-pnl" class="panel today-panel" aria-labelledby="today-title">
  <div class="panel-heading"><div><span class="section-dot teal"></span><h2 id="today-title">今天的全部損益</h2></div><div class="today-tools"><span id="today-date">台灣時間</span><button id="today-refresh" type="button">更新損益 ↻</button></div></div>
  <p id="today-scope" class="today-scope">Binance Demo · 現貨＋合約 · 台北 00:00 起算 · 所有版本與驗證單，不限本輪交易目標</p>
- <div class="today-metrics"><div><span>今日已實現淨損益 <small>USDT</small></span><strong id="today-realized">—</strong><small id="today-count">等待交易紀錄</small></div><div><span>目前持倉浮動損益 <small>USDT</small></span><strong id="today-floating">—</strong><small id="today-open-count">等待持倉紀錄</small></div></div>
+ <div class="today-metrics">
+  <div class="today-current-card"><span>目前損益 <small>USDT</small></span><strong id="today-current">—</strong><small id="today-current-detail">已實現＋未實現</small></div>
+  <div><span>已實現淨損益 <small>USDT</small></span><strong id="today-realized">—</strong><small id="today-count">等待交易紀錄</small></div>
+  <div><span>未實現損益 <small>USDT</small></span><strong id="today-floating">—</strong><small id="today-open-count">等待持倉紀錄</small></div>
+  <div><span>勝率</span><strong id="today-win-rate">—</strong><small id="today-win-detail">已平倉勝／負</small></div>
+  <div class="today-goal-card"><span>100 筆驗證進度</span><strong id="today-goal-progress">—</strong><small id="today-goal-label">等待新驗證輪</small><div class="today-goal-track" aria-hidden="true"><i id="today-goal-bar"></i></div></div>
+ </div>
  <div class="today-table-wrap"><table class="today-table today-mode-table"><thead><tr><th>市場</th><th>今日平倉</th><th>盈虧筆數</th><th>已實現淨損益 USDT</th><th>目前持倉</th><th>浮動損益 USDT</th></tr></thead><tbody id="today-summary"></tbody></table></div>
  <div class="today-status-line"><span id="today-status" role="status">正在核對兩個 Demo 帳戶…</span><span id="today-updated">—</span></div>
  <h3>目前持倉</h3><div class="today-table-wrap"><table class="today-table"><thead><tr><th>市場／編號</th><th>交易對</th><th>方向</th><th>開倉時間</th><th>平倉時間</th><th>數量</th><th>開倉價</th><th>平倉／現價</th><th>淨損益 USDT</th><th>退出方式</th></tr></thead><tbody id="today-open"></tbody></table></div>

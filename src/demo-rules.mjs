@@ -1,7 +1,7 @@
 // Live Demo forward trial. Historical v3 remains immutable in baseline.mjs;
 // the original candidate B is retained below for reproducible v4 evidence.
 import Decimal from 'decimal.js';
-import {FLOW_POLICY,FLOW_ONLY_POLICY,assessOrderFlow,assessSpotFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
+import {FLOW_POLICY,FLOW_ONLY_POLICY,FLOW_SELECTIVITY,assessOrderFlow,assessSpotFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
 import { baselineDecision } from './baseline.mjs';
 import { evaluateEntryQuality } from './entry-quality.mjs';
 import { isEntry } from './mode.mjs';
@@ -335,7 +335,8 @@ export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}=
    if(adaptiveEnabled){
     adaptiveParameters=deriveAdaptiveParameters({mode,long,proof:market.orderFlow,atr15,quotePrice:price.toFixed(),estimatedRoundTripCostBps:reserve.toFixed(),volatility:closedVolatilityInput(market.candles,snapshot.candleBoundary)});
     check.adaptiveParameters=adaptiveParameters;
-    const adaptiveFlow=assessOrderFlow(market.orderFlow,{mode,pair,long,now,minTakerShare:adaptiveParameters.minTakerShare});
+    const adaptiveFlow=assessOrderFlow(market.orderFlow,{mode,pair,long,now,minTakerShare:adaptiveParameters.minTakerShare,
+     minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance});
     check.flowDiagnostics=adaptiveFlow;flowDiagnostics=adaptiveFlow;
     if(!adaptiveFlow.eligible){check.reasons.push('FLOW_ADAPTIVE_SUPPORT_TOO_SMALL');return hold(['FLOW_ADAPTIVE_SUPPORT_TOO_SMALL']);}
     required=Decimal.max(required,reserve.plus(adaptiveParameters.costBufferBps));

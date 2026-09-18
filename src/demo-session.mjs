@@ -1,9 +1,10 @@
 // Public reporting boundary only. No broker, reset, order or configuration writes.
-import {join} from 'node:path';
+import {join,resolve,relative} from 'node:path';
 import {ROOT} from './paths.mjs';
 import {readJson} from './io.mjs';
 
 export const DEMO_SESSION_FILE=join(ROOT,'local','demo-session.json');
+export const ACTIVE_DEMO_GOAL_FILE=join(ROOT,'local','trade-goals','active.json');
 const modes=['demo','demo-futures'];
 const invalid=()=>Error('DEMO_SESSION_INVALID');
 export function validateDemoSession(value,{now=Date.now()}={}){
@@ -19,6 +20,28 @@ export function validateDemoSession(value,{now=Date.now()}={}){
 export async function readDemoSession({file=DEMO_SESSION_FILE,now=Date.now()}={}){
  let value;try{value=await readJson(file);}catch(error){if(error.code==='ENOENT')return null;throw invalid();}
  return validateDemoSession(value,{now});
+}
+
+// The execution session above remains the runtime authority. The dashboard can
+// start a fresh reporting scope without rewriting that authority (or deleting
+// its audit trail) by pointing active.json at a new goal. This scope is still
+// validated with the same session contract before it is used for PnL.
+export async function readActiveDemoScope({file=ACTIVE_DEMO_GOAL_FILE,now=Date.now()}={}){
+ let active;
+ try{active=await readJson(file);}catch(error){if(error.code==='ENOENT')return null;throw invalid();}
+ if(!active||typeof active!=='object'||Array.isArray(active)||
+  typeof active.goalPath!=='string'||typeof active.goalId!=='string'||typeof active.sessionId!=='string')throw Error('ACTIVE_GOAL_INVALID');
+ const clean=active.goalPath.replaceAll('\\','/');
+ if(clean.startsWith('/')||clean.split('/').includes('..')||!clean.startsWith('local/trade-goals/'))throw Error('ACTIVE_GOAL_INVALID');
+ const goalFile=resolve(ROOT,clean),inside=relative(ROOT,goalFile);
+ if(!inside||inside.startsWith('..')||inside.includes(':'))throw Error('ACTIVE_GOAL_INVALID');
+ let goal;try{goal=await readJson(goalFile);}catch{throw Error('ACTIVE_GOAL_INVALID');}
+ if(!goal||typeof goal!=='object'||Array.isArray(goal)||goal.id!==active.goalId||goal.sessionId!==active.sessionId||
+  typeof goal.startedAt!=='string'||!Number.isFinite(Date.parse(goal.startedAt))||
+  typeof goal.target?.count!=='number'||!Number.isSafeInteger(goal.target.count)||goal.target.count<1||
+  !['combined','each'].includes(goal.target.scope))throw Error('ACTIVE_GOAL_INVALID');
+ const session=validateDemoSession({schemaVersion:1,id:goal.sessionId,startedAt:new Date(goal.startedAt).toISOString(),modes},{now});
+ return {session,goal,goalPath:clean};
 }
 export function sessionTrades(trades,session){
  if(!session)return trades;

@@ -40,8 +40,11 @@ export function syntheticModelEvidence(snapshot,{direction='long',targetByPair={
 
 export function flowFixture(now,mode='demo',pair='BTC/USDT',short=false){
  return {version:'sampled-demo-flow-v1',mode,pair,source:mode==='demo'?'https://demo-api.binance.com':'https://demo-fapi.binance.com',
- books:[0,1,2].map(i=>({at:now-20000+i*10000,updateId:i+1,
-  bids:Array.from({length:5},(_,k)=>[String(100+(short?-1:1)*i*.001-.001-k*.001),short?'1':'3']),
-  asks:Array.from({length:5},(_,k)=>[String(100+(short?-1:1)*i*.001+.001+k*.001),short?'3':'1'])})),
- startTime:now-61500,endTime:now-1500,trades:[0,1,2].map(i=>({a:i+1,T:now-55000+i*25000,p:'100',q:'1',m:short}))};
+  books:[0,1,2].map(i=>({at:now-20000+i*10000,updateId:i+1,
+  // Keep the synthetic fixture inside the live minute selectivity envelope:
+  // 0.6 bps directional mid move and ~28.6% depth imbalance.  The
+  // `short` shape reverses both direction and depth support.
+  bids:Array.from({length:5},(_,k)=>[String(100+(short?-1:1)*i*.003-.001-k*.001),short?'1':'1.8']),
+  asks:Array.from({length:5},(_,k)=>[String(100+(short?-1:1)*i*.003+.001+k*.001),short?'1.8':'1'])})),
+  startTime:now-61500,endTime:now-1500,trades:[0,1,2].map(i=>({a:i+1,T:now-55000+i*25000,p:'100',q:'1',m:short}))};
 }

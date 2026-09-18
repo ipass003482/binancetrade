@@ -1,6 +1,6 @@
 import { DashboardStore } from './store.mjs';
 import { timingView } from './timing.mjs';
-const $=id=>document.getElementById(id),store=new DashboardStore();
+const $=id=>document.getElementById(id),query=new URLSearchParams(location.search),initialMode=['dry-run','demo','demo-futures'].includes(query.get('mode'))?query.get('mode'):'dry-run',store=new DashboardStore();
 const number=(v,d=2)=>v===null||v===undefined||v===''||!Number.isFinite(Number(v))?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const signed=v=>v===null||v===undefined?'—':(Number(v)>0?'+':'')+number(v);
 const clock=v=>v?new Date(v).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit',hour12:false}):'—';
@@ -348,7 +348,7 @@ for(const b of document.querySelectorAll('[data-drawer]'))b.addEventListener('cl
 $('close-drawer').addEventListener('click',()=>$('drawer').close());
 for(const button of document.querySelectorAll('.help-button'))button.addEventListener('click',()=>$('help').showModal());$('close-help').addEventListener('click',()=>$('help').close());
 new ResizeObserver(()=>{drawChart();drawAnalytics();}).observe($('chart'));
-store.refresh({preview:new URLSearchParams(location.search).get('preview')==='1'});
+store.refresh({mode:initialMode,preview:query.get('preview')==='1'});
 setInterval(()=>{if(!document.hidden&&!store.state.preview&&!store.state.loading&&!$('drawer').open)store.refresh();},30000);
 
 
