@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {assessOrderFlow,assessSpotFlowContinuation,FLOW_SELECTIVITY,FLOW_VERSION} from '../src/order-flow.mjs';
+import {assessOrderFlow,assessSpotFlowContinuation,assessFuturesFlowContinuation,FLOW_SELECTIVITY,FLOW_VERSION} from '../src/order-flow.mjs';
 import {sampleOrderFlow} from '../src/order-flow-collector.mjs';
 import {modelRuleDecision,orderFlowRuleDecision} from '../src/demo-rules.mjs';
 const B=Date.parse('2026-09-15T00:00:00Z'),now=B+20000;
@@ -12,6 +12,15 @@ test('spot continuation uses strict executable ask comparison and rejects unusab
   assert.equal(assessSpotFlowContinuation(p,quote).eligible,false);
  assert.equal(assessSpotFlowContinuation(proof(true),{ask:'100.002',bid:'99.99'}).eligible,false);
 });
+test('futures continuation checks the executable side for both directions',()=>{
+ const long=proof(false,'demo-futures'),short=proof(true,'demo-futures');
+ const longOrigin=long.books[0].asks[0][0],shortOrigin=short.books[0].bids[0][0];
+ assert.equal(assessFuturesFlowContinuation(long,{ask:String(Number(longOrigin)+.001),bid:longOrigin},{long:true}).eligible,true);
+ assert.equal(assessFuturesFlowContinuation(long,{ask:longOrigin,bid:String(Number(longOrigin)-.001)},{long:true}).eligible,false);
+ assert.equal(assessFuturesFlowContinuation(short,{ask:shortOrigin,bid:String(Number(shortOrigin)-.001)},{long:false}).eligible,true);
+ assert.equal(assessFuturesFlowContinuation(short,{ask:String(Number(shortOrigin)+.001),bid:shortOrigin},{long:false}).eligible,false);
+ assert.equal(assessFuturesFlowContinuation(short,{ask:'100',bid:'99.9'},{long:true}).eligible,false);
+});
 test('spot recheck cancels a reversed quote without disabling the next cycle',()=>{
  const a=args(),market=a.snapshot.markets[0],origin=market.orderFlow.books[0].asks[0][0];
  const initial=orderFlowRuleDecision(a);assert.equal(initial.action,'buy');
@@ -20,8 +29,10 @@ test('spot recheck cancels a reversed quote without disabling the next cycle',()
  const canceled=orderFlowRuleDecision({...a,quote:{ask:origin,bid:String(Number(origin)-.001)}});
  assert.equal(canceled.action,'hold');assert.ok(canceled.reasons.includes('SPOT_FLOW_PRICE_NOT_CONTINUED'));
  assert.equal(orderFlowRuleDecision(a).action,'buy');
- const future=orderFlowRuleDecision(args(true));assert.equal(future.action,'open-short');
- assert.equal(future.executionQualityVersion,null);assert.equal(future.entryConfirmation.executionContinuation,undefined);
+ const futureInput=args(true),futureBook=futureInput.snapshot.markets[0].orderFlow.books[0];
+ const future=orderFlowRuleDecision({...futureInput,quote:{bid:String(Number(futureBook.bids[0][0])-.001),ask:String(Number(futureBook.asks[0][0])+.001)}});
+ assert.equal(future.action,'open-short');
+ assert.equal(future.executionQualityVersion,null);assert.equal(future.entryConfirmation.executionContinuation.version,'flow-futures-price-continuation-v1');
 });
 function proof(short=false,mode=short?'demo-futures':'demo'){
  const books=[-20000,-10000,0].map((delta,i)=>{const mid=100+(short?-1:1)*i*.003;
@@ -43,7 +54,8 @@ function args(short=false,reclaim=false){
  if(!short)for(const b of flow.books)for(const levels of [b.bids,b.asks])for(const row of levels)row[0]=String(Number(row[0])-1);
  const candles=Array.from({length:96},(_,i)=>{const c=short?105-i*.05:95+i*.05;return {openTime:B-(96-i)*300000,closeTime:B-(95-i)*300000-1,open:String(c),close:String(c),high:String(c+1),low:String(c-1),volume:'1'};});
  if(reclaim){const c=Number(candles.at(-1).close);for(const [idx,off]of [[94,-.2],[93,-.1]]){const p=c+(short?-off:off);Object.assign(candles[idx],{open:String(p),close:String(p),high:String(p+.01),low:String(p-.01)});}}
- const origin=candles.at(-1).close,market={pair,candles,orderFlow:flow,bid:String(Number(origin)-.001),ask:String(Number(origin)+.001),verifiedSpot:mode==='demo',verifiedFutures:mode==='demo-futures'};
+ const origin=candles.at(-1).close;
+ const market={pair,candles,orderFlow:flow,bid:String(Number(origin)-.001),ask:String(Number(origin)+.001),verifiedSpot:mode==='demo',verifiedFutures:mode==='demo-futures'};
  const snapshot={mode,timeframe:'5m',candleBoundary:B,createdAt:new Date(now).toISOString(),markets:[market],evidence:[{id:(mode==='demo'?'spot:':'futures:')+pair,status:'ok',data:{pair}},{id:'technical:'+pair,status:'ok',pair}]};
  const modelEvidence={status:'ok',entryAllowed:true,modelFingerprint:'a'.repeat(64),predictionSha256:'b'.repeat(64),prediction:{issuedAt:new Date(B+3000).toISOString(),forecasts:[{pair,originClose:origin,forecastCloses:[1,2,3].map(i=>String(Number(origin)+(short?-1:1)*i*.01)),targetCloseAt:B+899999}]}};
  return {snapshot,pair,modelEvidence,cost:{status:'ok',estimatedRoundTripCostBps:'20',requiredPriceSpaceBps:'50'},now};
@@ -89,14 +101,16 @@ test('one-minute flow decisions retain closed5m ATR, adapt entry inputs and reje
   Object.assign(a.snapshot,{decisionCadenceVersion:'flow-minute-v1',decisionIntervalMs:60000,decisionBoundary:minute});
   const proof=a.snapshot.markets[0].orderFlow;proof.startTime+=delta;proof.endTime+=delta;
   for(const b of proof.books)b.at+=delta;for(const t of proof.trades)t.T+=delta;
-  const r=orderFlowRuleDecision(a);
+  const book=a.snapshot.markets[0].orderFlow.books[0];
+  const quote=short?{bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)}:undefined;
+  const r=orderFlowRuleDecision({...a,quote});
   assert.equal(r.action,short?'open-short':'buy');assert.equal(r.timeframe,'5m');assert.equal(r.atrTimeframe,'15m');
   assert.equal(r.signalAt,minute);assert.equal(r.entryConfirmation.confirmationAt,B);
   assert.equal(r.adaptiveParameters.inputs.atr15,String(r.atr15));
   assert.equal(r.adaptiveParameters.inputs.quotePrice,r.entryConfirmation.quotePrice);
   assert.ok(Number(r.requiredPriceSpaceBps)>=Number(a.cost.estimatedRoundTripCostBps)+Number(r.adaptiveParameters.costBufferBps));
   assert.equal(r.flowDiagnostics.minimumTakerShare,String(Number(r.adaptiveParameters.minTakerShare)));
-  assert.deepEqual(orderFlowRuleDecision({...a,now:minute+60000}).reasons,['FLOW_DECISION_EXPIRED']);
+  assert.deepEqual(orderFlowRuleDecision({...a,quote,now:minute+60000}).reasons,['FLOW_DECISION_EXPIRED']);
   const broken=structuredClone(a);broken.snapshot.decisionIntervalMs=300000;
   assert.deepEqual(orderFlowRuleDecision(broken).reasons,['FLOW_DECISION_TIMING_INVALID']);
  }
@@ -127,9 +141,13 @@ test('flow-only ignores absent/contrary model and opposing candle trends, but st
   // Reverse closed prices around 100 while preserving valid OHLC and ATR.
   for(const c of a.snapshot.markets[0].candles){const high=c.high,low=c.low;c.open=String(200-Number(c.open));c.close=String(200-Number(c.close));c.high=String(200-Number(low));c.low=String(200-Number(high));}
   for(const modelEvidence of [null,{status:'unavailable'},a.modelEvidence]){
-   const r=orderFlowRuleDecision({...a,modelEvidence});assert.equal(r.action,short?'open-short':'buy');assert.equal(r.entryConfirmation.forecastClose,undefined);assert.equal(r.entryPolicyVersion,'order-flow-only-v1');
+   const book=a.snapshot.markets[0].orderFlow.books[0];
+   const quote=short?{bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)}:undefined;
+   const r=orderFlowRuleDecision({...a,quote,modelEvidence});assert.equal(r.action,short?'open-short':'buy');assert.equal(r.entryConfirmation.forecastClose,undefined);assert.equal(r.entryPolicyVersion,'order-flow-only-v1');
   }
-  assert.equal(orderFlowRuleDecision({...a,cost:{...a.cost,requiredPriceSpaceBps:'9999'}}).action,'hold');
+  const book=a.snapshot.markets[0].orderFlow.books[0];
+  const quote=short?{bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)}:undefined;
+  assert.equal(orderFlowRuleDecision({...a,quote,cost:{...a.cost,requiredPriceSpaceBps:'9999'}}).action,'hold');
   a.snapshot.markets[0].orderFlow=null;assert.equal(orderFlowRuleDecision(a).action,'hold');
  }
 });

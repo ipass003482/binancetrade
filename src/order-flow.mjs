@@ -6,6 +6,7 @@ export const FLOW_ONLY_POLICY='order-flow-only-v1';
 export const SPOT_FLOW_QUALITY_VERSION='flow-confirmed-exit-v2';
 export const SPOT_FLOW_EXIT_POLICY=Object.freeze({version:'rolling-opposite-flow-v2',windowMs:60000,minConfirmationMs:20000,minSamples:3,maxObservationGapMs:20000,oppositeTakerShare:'0.55'});
 export const SPOT_FLOW_CONTINUATION_VERSION='flow-price-continuation-v1';
+export const FUTURES_FLOW_CONTINUATION_VERSION='flow-futures-price-continuation-v1';
 export const FLOW_POLICY='trend-pullback-flow-v1';
 export const FLOW_VERSION='sampled-demo-flow-v1';
 // A negative Demo fill is evidence that the immediately sampled direction
@@ -46,6 +47,22 @@ export function assessSpotFlowContinuation(proof,quote){
   return {...base,status:'ok',eligible,originAsk:origin.toFixed(),quoteAsk:ask.toFixed(),
    reason:eligible?null:'SPOT_FLOW_PRICE_NOT_CONTINUED'};
  }catch{return {...base,status:'unavailable',eligible:false,reason:'SPOT_FLOW_CONTINUATION_INVALID'};}
+}
+// Futures uses the same stale-signal protection as spot, but checks the
+// executable side of the contract quote: ask for a long and bid for a short.
+// A favorable tape/depth sample is not enough if the executable quote has
+// already crossed back through the first sampled book level.
+export function assessFuturesFlowContinuation(proof,quote,{long}={}){
+ const base={version:FUTURES_FLOW_CONTINUATION_VERSION};
+ try{
+  if(proof?.mode!=='demo-futures'||proof.version!==FLOW_VERSION||proof.books?.length!==3||typeof long!=='boolean')throw Error();
+  const origin=positive(proof.books[0][long?'asks':'bids'][0][0]),
+   ask=positive(quote?.ask),bid=positive(quote?.bid);
+  if(bid.gte(ask))throw Error();
+  const executable=long?ask:bid,eligible=long?executable.gt(origin):executable.lt(origin);
+  return {...base,status:'ok',eligible,long,originPrice:origin.toFixed(),quotePrice:executable.toFixed(),
+   reason:eligible?null:'FUTURES_FLOW_PRICE_NOT_CONTINUED'};
+ }catch{return {...base,status:'unavailable',eligible:false,reason:'FUTURES_FLOW_CONTINUATION_INVALID'};}
 }
 // Ten-second depth samples are not a full event-by-event order book or OFI.
 // 55% taker notional, persistent depth support and favorable mid-price change

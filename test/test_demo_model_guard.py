@@ -523,7 +523,7 @@ def flow_plan(short=False):
     price['eligible']=False;price['checks']['reclaim']=False
     books=[]
     for i in range(3):
-        mid=100+(-1 if short else 1)*i*.001
+        mid=(100.1 if short else 100)+(-1 if short else 1)*i*.001
         books.append(dict(at=MS-20000+i*10000,updateId=i+1,
             bids=[[str(mid-.001-k*.001),'1' if short else '3'] for k in range(5)],
             asks=[[str(mid+.001+k*.001),'3' if short else '1'] for k in range(5)]))
@@ -531,6 +531,9 @@ def flow_plan(short=False):
         source='https://demo-fapi.binance.com' if short else 'https://demo-api.binance.com',
         books=books,startTime=MS-61500,endTime=MS-1500,
         trades=[dict(a=i+1,T=MS-55000+i*25000,p='100',q='1',m=short) for i in range(3)])
+    if short:
+        confirmation['executionContinuation']=dict(version='flow-futures-price-continuation-v1',long=False,
+            originPrice=books[0]['bids'][0][0],quotePrice=confirmation['quotePrice'])
     return value
 
 
@@ -587,6 +590,9 @@ def flow_only_plan(short=False):
         value['flowExit']=dict(POLICY)
         value['flowStrength']={'version':'depth-change-rank-v1','delta':str(strength(old['orderFlow']))}
         value['entryConfirmation']['executionContinuation']=dict(version='flow-price-continuation-v1',originAsk=old['orderFlow']['books'][0]['asks'][0][0])
+    else:
+        value['entryConfirmation']['executionContinuation']=dict(version='flow-futures-price-continuation-v1',long=False,
+            originPrice=old['orderFlow']['books'][0]['bids'][0][0],quotePrice=value['entryConfirmation']['quotePrice'])
     value['entryEvidence']=dict(version='order-flow-evidence-v1',snapshotId=value['snapshotId'],usedForEntryDecision=True,
         proofSha256=sha256(json.dumps(old['orderFlow'],separators=(',',':'),ensure_ascii=False).encode()).hexdigest())
     g=value['nativeEntryGuard']
@@ -665,10 +671,25 @@ def test_continuation_is_rechecked_after_callback(frozen,stage):
                 guard.guard_order_wire(exchange,'https://demo-api.binance.com/api/v3/order','POST','symbol=ETHUSDT&side=BUY&type=MARKET&quantity=0.25')
 
 
-def test_continuation_cannot_be_applied_to_futures(frozen):
-    value=flow_only_plan(True);value['executionQualityVersion']='flow-price-continuation-v1'
-    with pytest.raises(ccxt.PermissionDenied,match='FLOW_CONTINUATION_MODE'):
+@pytest.mark.parametrize('change',['missing','version','side','origin','quote','extra'])
+def test_futures_continuation_proof_cannot_be_omitted_or_forged(frozen,change):
+    value=flow_only_plan(True);c=value['entryConfirmation']['executionContinuation']
+    if change=='missing':value['entryConfirmation'].pop('executionContinuation')
+    elif change=='version':c['version']='unknown'
+    elif change=='side':c['long']=True
+    elif change=='origin':c['originPrice']='1'
+    elif change=='quote':c['quotePrice']='100.001'
+    elif change=='extra':c['ignored']=True
+    with pytest.raises(ccxt.PermissionDenied,match='FLOW_(?:GUARD|CONTINUATION)_IDENTITY'):
         authorize(fake_exchange('demo-futures'),value)
+
+
+@pytest.mark.parametrize('rate_offset', [0, .001])
+def test_futures_short_continuation_rejects_callback_at_or_above_origin(frozen,rate_offset):
+    value=flow_only_plan(True)
+    rate=float(Decimal(value['entryConfirmation']['executionContinuation']['originPrice'])+Decimal(str(rate_offset)))
+    with pytest.raises(ccxt.PermissionDenied,match='FLOW_PRICE_NOT_CONTINUED'):
+        authorize(fake_exchange('demo-futures'),value,amount=.2,rate=rate)
 
 
 @pytest.mark.parametrize('change',['quality','exit_missing','exit_extra','exit_window','rank_missing','rank_forged'])

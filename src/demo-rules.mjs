@@ -1,7 +1,7 @@
 // Live Demo forward trial. Historical v3 remains immutable in baseline.mjs;
 // the original candidate B is retained below for reproducible v4 evidence.
 import Decimal from 'decimal.js';
-import {FLOW_POLICY,FLOW_ONLY_POLICY,FLOW_SELECTIVITY,assessOrderFlow,assessSpotFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
+import {FLOW_POLICY,FLOW_ONLY_POLICY,FLOW_SELECTIVITY,assessOrderFlow,assessSpotFlowContinuation,assessFuturesFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,FUTURES_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
 import { baselineDecision } from './baseline.mjs';
 import { evaluateEntryQuality } from './entry-quality.mjs';
 import { isEntry } from './mode.mjs';
@@ -319,7 +319,7 @@ export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}=
   const check={action,eligible:false,reasons:[],flowDiagnostics:flow};directionChecks.push(check);
   if(!flow.eligible){check.reasons.push(flow.reason);continue;}
   flowDiagnostics=flow;
-  const continuation=mode==='demo'?assessSpotFlowContinuation(market.orderFlow,quote??market):null;
+  const continuation=mode==='demo'?assessSpotFlowContinuation(market.orderFlow,quote??market):assessFuturesFlowContinuation(market.orderFlow,quote??market,{long});
   if(continuation){check.executionContinuation=continuation;if(!continuation.eligible)return hold([continuation.reason]);}
   const quality=evaluateFlowEntryQuality(snapshot,{pair,action,evidenceIds:[(mode==='demo'?'spot:':'futures:')+pair]},now);
   check.metrics=quality.metrics;
@@ -353,7 +353,7 @@ export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}=
     requiredPriceSpaceBps:required.toFixed(),selectionScoreBps:new Decimal(check.netRewardRisk.netRewardFraction).minus(check.netRewardRisk.riskFraction).mul(10000).toFixed(),
     selectionScoreBasis:'planned_net_reward_minus_stressed_risk_not_expected_return',directionChecks,flowDiagnostics,...(adaptiveParameters?{adaptiveParameters}:{}),profitProtection:DEMO_PROFIT_PROTECTION,
     entryConfirmation:{version:'order-flow-atr-v1',entryRoute:'order-flow',orderFlow:market.orderFlow,confirmationAt:snapshot.candleBoundary,quotePrice:price.toFixed(),atr15,targetAtr,targetFraction,
-     ...(continuation?{executionContinuation:{version:SPOT_FLOW_CONTINUATION_VERSION,originAsk:continuation.originAsk}}:{})},
+     ...(continuation?{executionContinuation:mode==='demo'?{version:SPOT_FLOW_CONTINUATION_VERSION,originAsk:continuation.originAsk}:{version:FUTURES_FLOW_CONTINUATION_VERSION,long:continuation.long,originPrice:continuation.originPrice,quotePrice:continuation.quotePrice}}:{})},
     note:'Order flow alone selects entry direction. Model and candle trends do not gate orders. ATR exits and costs describe planned geometry, not expected profit.'};
   }catch{return hold(['FLOW_PLAN_INVALID']);}
  }

@@ -248,7 +248,7 @@ def _flow_guard(plan, mode, pair, side):
     elif any(key in plan or isinstance(g, dict) and key in g for key in _CADENCE_KEYS | {'adaptiveParameters'}):
         reject('FLOW_CADENCE_IDENTITY')
     confirmation_keys = {'version','entryRoute','orderFlow','confirmationAt','quotePrice','atr15','targetAtr','targetFraction'}
-    if mode == 'demo':
+    if mode in ('demo', 'demo-futures'):
         confirmation_keys.add('executionContinuation')
     if (not isinstance(g, dict) or set(g) != keys or g['version'] not in (*_MINUTE_VERSIONS, LEGACY_VERSION)
             or (g['mode'],g['pair'],g['side']) != (mode,pair,side)
@@ -276,20 +276,31 @@ def _flow_guard(plan, mode, pair, side):
     except Exception:
         reject('FLOW_EVIDENCE')
     reference=decimal(g['bridgeQuotePrice'],True)
-    if mode == 'demo':
+    if mode in ('demo', 'demo-futures'):
         continuation = c['executionContinuation']
-        if (plan.get('executionQualityVersion') != QUALITY_VERSION
-                or not isinstance(continuation, dict) or set(continuation) != {'version', 'originAsk'}
-                or continuation['version'] != 'flow-price-continuation-v1'
-                or decimal(continuation['originAsk'], True) != decimal(c['orderFlow']['books'][0]['asks'][0][0], True)):
-            reject('FLOW_CONTINUATION_IDENTITY')
-        rank = plan.get('flowStrength')
-        if (plan.get('flowExit') != FLOW_EXIT_POLICY or not isinstance(rank, dict)
-                or set(rank) != {'version', 'delta'} or rank.get('version') != 'depth-change-rank-v1'
-                or abs(decimal(rank.get('delta'), signed=True)-flow_strength(c['orderFlow'])) > Decimal('1e-12')):
-            reject('FLOW_STRENGTH_EXIT_CONTRACT')
-        if reference <= decimal(continuation['originAsk'], True):
-            reject('FLOW_PRICE_NOT_CONTINUED')
+        if mode == 'demo':
+            if (plan.get('executionQualityVersion') != QUALITY_VERSION
+                    or not isinstance(continuation, dict) or set(continuation) != {'version', 'originAsk'}
+                    or continuation['version'] != 'flow-price-continuation-v1'
+                    or decimal(continuation['originAsk'], True) != decimal(c['orderFlow']['books'][0]['asks'][0][0], True)):
+                reject('FLOW_CONTINUATION_IDENTITY')
+            rank = plan.get('flowStrength')
+            if (plan.get('flowExit') != FLOW_EXIT_POLICY or not isinstance(rank, dict)
+                    or set(rank) != {'version', 'delta'} or rank.get('version') != 'depth-change-rank-v1'
+                    or abs(decimal(rank.get('delta'), signed=True)-flow_strength(c['orderFlow'])) > Decimal('1e-12')):
+                reject('FLOW_STRENGTH_EXIT_CONTRACT')
+            if reference <= decimal(continuation['originAsk'], True):
+                reject('FLOW_PRICE_NOT_CONTINUED')
+        else:
+            if (not isinstance(continuation, dict) or set(continuation) != {'version', 'long', 'originPrice', 'quotePrice'}
+                    or continuation['version'] != 'flow-futures-price-continuation-v1'
+                    or type(continuation['long']) is not bool
+                    or continuation['long'] != (g['side'] == 'long')
+                    or decimal(continuation['originPrice'], True) != decimal(c['orderFlow']['books'][0]['asks' if continuation['long'] else 'bids'][0][0], True)
+                    or decimal(continuation['quotePrice'], True) != reference):
+                reject('FLOW_CONTINUATION_IDENTITY')
+            if (continuation['long'] and reference <= decimal(continuation['originPrice'], True)) or (not continuation['long'] and reference >= decimal(continuation['originPrice'], True)):
+                reject('FLOW_PRICE_NOT_CONTINUED')
     elif any(k in plan for k in ('executionQualityVersion','flowStrength','flowExit')):
         reject('FLOW_CONTINUATION_MODE')
     if reference != decimal(c['quotePrice'],True) or any(decimal(g[k],True) != decimal(c[k],True) for k in ('atr15','targetAtr','targetFraction')):
@@ -455,6 +466,11 @@ def _validate(permit, now, mono):
         # orders have no guaranteed fill price, and wire does not fetch a quote.
         if flow_only and mode == 'demo' and rate <= decimal(plan['entryConfirmation']['executionContinuation']['originAsk'], True):
             reject('FLOW_PRICE_NOT_CONTINUED')
+        if flow_only and mode == 'demo-futures':
+            continuation = plan['entryConfirmation']['executionContinuation']
+            origin = decimal(continuation['originPrice'], True)
+            if (continuation['long'] and rate <= origin) or (not continuation['long'] and rate >= origin):
+                reject('FLOW_PRICE_NOT_CONTINUED')
         edge = None if flow_only else (decimal(guard['forecastClose'], True) / rate - 1) * (10000 if permit['side'] == 'long' else -10000)
         if not flow_only and edge <= 0:
             reject('FORECAST_DIRECTION_PRICE')
