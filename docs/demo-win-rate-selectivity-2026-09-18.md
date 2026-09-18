@@ -16,7 +16,7 @@
 
 ## 驗證與部署
 
-`node --test --test-concurrency=1 test/*.test.mjs`：687/687 通過。`node scripts/test-python.mjs`：797 通過（僅有 pytest 快取目錄權限警告，不影響測試）。2026-09-18 05:25 UTC 兩個 Binance Demo watcher 已受控重載新 host 程式；原生 Python Demo 引擎未重啟，既有持倉仍由原生保護管理。來源核對 115/115、未知委託 0，重載後 05:27 UTC 的兩個一分鐘週期均完成；實際新成交仍須持續觀察。
+時間標示統一採台灣時間（Asia/Taipei，UTC+8）。`node --test --test-concurrency=1 test/*.test.mjs`：687/687 通過。`node scripts/test-python.mjs`：797 通過（僅有 pytest 快取目錄權限警告，不影響測試）。2026-09-18 13:25（台灣）兩個 Binance Demo watcher 已受控重載新 host 程式；原生 Python Demo 引擎未重啟，既有持倉仍由原生保護管理。來源核對 115/115、未知委託 0，重載後 13:27（台灣）的兩個一分鐘週期均完成；實際新成交仍須持續觀察。
 
 ## v2 量能修正
 
