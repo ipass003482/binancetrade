@@ -11,7 +11,7 @@ export const FLOW_VERSION='sampled-demo-flow-v1';
 // Bounded selectivity for the live minute route. These filters remove
 // direction that is only a rounding tick or an unusually one-sided book;
 // they are an observed Demo hypothesis, not a forecast or profit claim.
-export const FLOW_SELECTIVITY=Object.freeze({version:'flow-selectivity-v1',minimumMidChangeBps:'0.5',maximumDepthImbalance:'0.3'});
+export const FLOW_SELECTIVITY=Object.freeze({version:'flow-selectivity-v2',minimumMidChangeBps:'0.25',maximumDepthImbalance:'0.7'});
 export const FLOW_MAX_AGE_MS=45000;
 const fail=reason=>({status:'unavailable',eligible:false,reason});
 const positive=v=>{if(!['string','number'].includes(typeof v))throw Error();const x=new Decimal(v);if(!x.isFinite()||x.lte(0)||Math.abs(x.e)>50)throw Error();return x;};

@@ -8,6 +8,7 @@ import { checkDemoOrderSize } from './demo-order-size.mjs';
 import { demoStrategyContract } from './strategy-contract.mjs';
 import {volumeMinimum} from './volume-experiment.mjs';
 import {demoRiskPolicy} from './demo-risk.mjs';
+import {FLOW_SELECTIVITY} from './order-flow.mjs';
 export const RULE_ENGINE_VERSION='demo-rule-exits-v12';
 // Reject a config-only AI switch that bypasses structured Demo entry/exit plans.
 export const DecisionConfigSchema=z.object({version:z.literal(1),demoEngine:z.literal('rules'),ruleVersion:z.literal(DEMO_RULE_VERSION)}).strict();
@@ -33,7 +34,7 @@ export function rulesProposal(snapshot,policy,account,modelEvidence,{excludedPai
  const pair=entry?selected.pair:policy.pairs[0];
  const proposal={snapshotId:snapshot.id,action:entry?selected.action:'hold',pair,stakeUsdt:entry?selected.stakeUsdt:'0',
   evidenceIds:entry?[(futures?'futures:':'spot:')+pair,'technical:'+pair,'cost:'+pair]:[],
-  reason:entry?'策略 '+ruleVersion+'：'+(live?'訂單流成交力道與連續深度支持方向，且方向性中間價至少0.5 bps、五檔深度偏斜不超過30%；3 倍 ATR 目標扣除成本後至少覆蓋含成本停損風險，現貨優先依買盤深度優勢變化排序，再依計畫報酬與風險差排序，不是預期獲利。':'已收 K 突破。')+(selected.adaptiveParameters?'每分鐘評估；本筆依價差、成本與深度調整風險預算至 '+Number(selected.adaptiveParameters.riskBudgetUsdt).toFixed(4)+' USDT，成交力道門檻 '+(Number(selected.adaptiveParameters.minTakerShare)*100).toFixed(2)+'%。':'依 1 USDT 預估風險預算縮倉。')+'使用已收盤 15 分鐘 ATR 的停損／停利；最多持倉 4 小時。實際績效以 Demo 成交紀錄為準。':
+  reason:entry?'策略 '+ruleVersion+'：'+(live?'訂單流成交力道與連續深度支持方向，且方向性中間價至少'+FLOW_SELECTIVITY.minimumMidChangeBps+' bps、五檔深度偏斜不超過'+(Number(FLOW_SELECTIVITY.maximumDepthImbalance)*100).toFixed(0)+'%；3 倍 ATR 目標扣除成本後至少覆蓋含成本停損風險，現貨優先依買盤深度優勢變化排序，再依計畫報酬與風險差排序，不是預期獲利。':'已收 K 突破。')+(selected.adaptiveParameters?'每分鐘評估；本筆依價差、成本與深度調整風險預算至 '+Number(selected.adaptiveParameters.riskBudgetUsdt).toFixed(4)+' USDT，成交力道門檻 '+(Number(selected.adaptiveParameters.minTakerShare)*100).toFixed(2)+'%。':'依 1 USDT 預估風險預算縮倉。')+'使用已收盤 15 分鐘 ATR 的停損／停利；最多持倉 4 小時。實際績效以 Demo 成交紀錄為準。':
    '策略 '+ruleVersion+'：'+(selected&&full?'持倉或曝險容量不足。':'訂單流資料、方向支持或成本後報酬／風險未通過。')+' 詳細排除原因保存在 rules.json；持倉由引擎管理退出。',...(futures?{leverage:1}:{})};
  return {proposal,candidates,selected:entry?selected:null,metadata:{decisionEngine:'rules',llmInvoked:false,ruleVersion,parameters:live?(snapshot.volumeExperiment?{...DEMO_PARAMETERS,relativeVolumeMinimum:volumeMinimum(snapshot)}:DEMO_PARAMETERS):null,
   ...(live?{entrySignalEngine:'sampled_order_flow',modelInvoked:false,modelUsedForDecision:false,modelStatus:modelEvidence?.status??'unavailable',modelReason:modelEvidence?.reason??null,modelFingerprint:modelEvidence?.modelFingerprint??null,predictionSha256:modelEvidence?.predictionSha256??null,volumeExperiment:snapshot.volumeExperiment??null,strategyContract:demoStrategyContract(policy,snapshot)}:{}),snapshotId:snapshot.id,timeframe:snapshot.timeframe??'15m',performanceSource:'demo-exchange-fills'}};

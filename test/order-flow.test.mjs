@@ -78,7 +78,7 @@ test('live selectivity rejects weak mid movement and extreme depth while retaini
  assert.equal(assessOrderFlow(p,a).eligible,true);
  const weak=structuredClone(p);for(const [i,b] of weak.books.entries()){const mid=100+i*.001;b.bids[0][0]=String(mid-.001);b.asks[0][0]=String(mid+.001);}
  assert.equal(assessOrderFlow(weak,a).eligible,false);
- const extreme=structuredClone(p);for(const b of extreme.books){for(const row of b.bids)row[1]='4';for(const row of b.asks)row[1]='1';}
+ const extreme=structuredClone(p);for(const b of extreme.books){for(const row of b.bids)row[1]='6';for(const row of b.asks)row[1]='1';}
  assert.equal(assessOrderFlow(extreme,a).eligible,false);
 });
 

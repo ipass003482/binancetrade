@@ -1,4 +1,4 @@
-# Demo 勝率選擇性調整（2026-09-18）
+# Demo 訂單流選擇性與量能調整（2026-09-18）
 
 這次調整針對「有方向但優勢太弱」的訂單流進場，目標是減少低品質成交，不是宣稱能保證獲利。調整只影響新的進場；既有倉位、原生停損、停利、追蹤保護與四小時時間退出維持原計畫。
 
@@ -10,12 +10,18 @@
 
 ## 實作
 
-- `src/order-flow.mjs` 新增 `flow-selectivity-v1`：方向性中間價變化至少 `0.5` bps，三次五檔深度的絕對偏斜最多 `0.3`。
+- `src/order-flow.mjs` 曾載入 `flow-selectivity-v1`：方向性中間價變化至少 `0.5` bps，三次五檔深度的絕對偏斜最多 `0.3`。實際前向觀測的 45 個現貨、31 個合約方向檢查中，只有 3 個現貨通過、合約 0 個通過，確認這個版本過度壓低量能。
 - `src/demo-rules.mjs` 的自適應一分鐘路徑與 `src/bridge.mjs` 的送單前重驗都使用同一門檻；即使候選在較早的規則層通過，送單前仍必須再次通過。
 - `src/strategy-contract.mjs`、提案理由與測試契約已同步；缺資料、過期資料、方向不一致或門檻未達一律等待下一分鐘，不以配額強行下單。
 
 ## 驗證與部署
 
-`node --test --test-concurrency=1 test/*.test.mjs`：687/687 通過。`node scripts/test-python.mjs`：797 通過（僅有 pytest 快取目錄權限警告，不影響測試）。兩個 Binance Demo watcher 已受控重載新 host 程式；原生 Python Demo 引擎未重啟，既有持倉仍由原生保護管理。部署後的新一分鐘週期已寫入 `flow-selectivity-v1` 的門檻，未知委託為 0。
+`node --test --test-concurrency=1 test/*.test.mjs`：687/687 通過。`node scripts/test-python.mjs`：797 通過（僅有 pytest 快取目錄權限警告，不影響測試）。2026-09-18 05:25 UTC 兩個 Binance Demo watcher 已受控重載新 host 程式；原生 Python Demo 引擎未重啟，既有持倉仍由原生保護管理。來源核對 115/115、未知委託 0，重載後 05:27 UTC 的兩個一分鐘週期均完成；實際新成交仍須持續觀察。
+
+## v2 量能修正
+
+為保留原始 55% taker、三次同向深度、完整成本與原生保護，同時恢復足夠的前向樣本，現行 `flow-selectivity-v2` 將門檻調為方向性中間價至少 `0.25` bps、深度偏斜絕對值最多 `0.7`。這是有界的 Demo 量能假說；不把預估新增成交當成已成交，也不把量能增加當成勝率改善。v2 受控載入後只比較新的實際扣費成交、平均盈虧、PF、回撤與被過濾機會成本。
+
+v2 來源指紋已寫入 `local/adaptive-minute-2026-09-16/running.json` 與 `source-deployment.json`，兩模式 watcher 指紋分別為 `ef3b76808210d2f683646ebb381dbf2a603fffcec7122bad33d2ae8dfd7bca2f`（現貨）及 `f9676303450ead705da3f104691ee7e7054e4fce41bdc709623fa66ebdb80d17`（合約）。
 
 後續只用新的真實 Demo 成交驗證勝率、平均盈虧、PF、回撤與被過濾的機會成本；舊成交不回填為新版成果。
