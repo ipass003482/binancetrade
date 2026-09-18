@@ -14,6 +14,8 @@ Demo 每 5 分鐘收盤後約 5 秒啟動一輪，每輪取 96 根已收盤 K �
 
 另有獨立的 `ai-high-frequency-shadow-v1` 影子觀測器：每分鐘讀取公開訂單簿、主動成交與已收盤 1 分鐘 K 線，每 5 個週期才更新一次受限 AI 策略設定，並在 60 秒後記錄扣除研究成本情境的 markout。它固定是 `dry-run`、`tradeEnabled:false`，不會改變 Demo 下單規則或送出訂單。執行 `npm run ai:high-frequency-shadow -- --cycles 10 --interval-seconds 60` 可做有限週期觀測；完整限制與輸出見 [影子層紀錄](docs/ai-high-frequency-shadow-2026-09-18.md)。
 
+實際的高頻交易路徑是 Demo 的 `src/cli.mjs watch`（`live-flow-adaptive-v2`），現貨與合約各自運行，每 60 秒重新評估新鮮訂單流並交給既有成本、帳戶、原生停損與送單防護。現貨只允許做多，合約允許做多與做空；影子層不能取代這條送單路徑，也不能另外啟動第二個同帳戶 watcher，避免重複開倉。
+
 費率由 Demo 簽名唯讀接口讀取；缺漏或過期禁止新進場。滑點為設定假設。`watch` 每分鐘記錄全帳戶估值，未對帳外部資金流，因此估值變化不能當作策略淨利。
 
 執行 `npm run baseline -- download --mode demo --pair BTC/USDT --days 30` 可產生獨立歷史基準。資料、成本、原始碼及結果保存於 `local/<mode>/baselines/`；它不是完整引擎退出重播，也不是已驗證的樣本外績效。合約基準目前僅接受資金費率事件精確對齊 K 線邊界的資料，遇到不支援的時間戳會停止，不會假設費用為零。
