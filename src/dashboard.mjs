@@ -109,6 +109,7 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
  const policy=providedPolicy??await loadPolicy(mode);
  let account=null,summary=null,trades=null,historyError=null,engineError=null,engineVersion=null;
  let snapshot=null;
+ const tradingDisabled=await exists(join(local,'TRADING_DISABLED'));
  const setup={configured:await exists(join(local,'api-auth.json')),credentialsPresent:isDemo(mode)?await exists(join(local,'credentials.dpapi.json')):null};
  try {
   const client=providedClient??new FreqtradeClient(policy,await readJson(join(local,'api-auth.json')));
@@ -152,14 +153,14 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
  let diagnostics=null,diagnosticsError=null;
  if(isDemo(mode)&&decision)try{diagnostics=await readEntryDiagnostics(local,{mode,ruleVersion:decision.ruleVersion,
   allowance:operations.dailyEntryAllowance??null,now:observed,since:session?.startedAt??null});}catch(error){diagnosticsError=safeError(error);}
- return {mode,session,observedAt:new Date(observed).toISOString(),account,summary,trades,historyError,setup,engineError,decisions,stopped:await exists(join(local,'STOP')),
+ return {mode,session,observedAt:new Date(observed).toISOString(),account,summary,trades,historyError,setup,engineError,decisions,tradingDisabled,stopped:await exists(join(local,'STOP')),
   operations,diagnostics,diagnosticsError,timing,equity,forward,portfolio,supervisor,protection,
   artifactErrors:[...sessionArtifactErrors,...values.flatMap((result,index)=>result.status==='rejected'?[{artifact:['operations','timing','strategy','equity','forward','portfolio','supervisor','protection'][index],code:safeError(result.reason)}]:[])],
   strategy:{timeframe:policy.timeframe,decisionEngine:isDemo(mode)?decision?.demoEngine??null:'ai',ruleVersion:decision?.ruleVersion??null,engineVersion,rulesReady:engineVersion===RULE_ENGINE_VERSION},
   cycle:{stage:operations.cycle?.stage??'unknown',lastSuccessAt:operations.cycle?.lastSuccessAt??null},
   policy:{pairs:policy.pairs,...(isFutures(mode)?{marginMode:policy.marginMode,maxLeverage:policy.leverage,maxNotionalUsdt:policy.maxNotionalUsdt,maxTotalNotionalUsdt:policy.maxTotalNotionalUsdt}:{}),maxStakeUsdt:policy.maxStakeUsdt,maxExposureUsdt:policy.maxExposureUsdt,maxDailyLossUsdt:policy.maxDailyLossUsdt,maxOpenTrades:policy.maxOpenTrades,maxEntriesPerDay:policy.maxEntriesPerDay}};
 }
-const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs']]);
+const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/starfield.css','starfield.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs']]);
 const types={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',mjs:'text/javascript; charset=utf-8'};
 export function createDashboardServer({port=18100,state=dashboardState,quote=market,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope}={}) {
  const inflight=new Map(),cache=new Map();

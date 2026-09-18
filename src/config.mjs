@@ -32,5 +32,12 @@ export const ProposalSchema = z.object({
  snapshotId:z.string().uuid(),evidenceIds:z.array(z.string()).max(10),reason:z.string().min(1).max(1500)
 }).strict();
 
+export const HighFrequencyControlSchema=z.object({
+ decision:z.enum(['use','hold']),profile:z.enum(['auto','momentum','mean-reversion','breakout']),
+ sensitivity:z.enum(['conservative','balanced','aggressive']),evidenceIds:z.array(z.string()).max(10),
+ reason:z.string().min(1).max(600)
+}).strict();
+export const highFrequencyProposalSchema=policy=>proposalSchema(policy).extend({strategyControl:HighFrequencyControlSchema}).strict();
+
 export const FuturesProposalSchema=ProposalSchema.extend({action:z.enum(["hold","open-long","open-short","close-long","close-short"]),leverage:z.number().int().min(1).max(3)}).strict();
 export const proposalSchema=policy=>policy.mode==="demo-futures"?FuturesProposalSchema:ProposalSchema;

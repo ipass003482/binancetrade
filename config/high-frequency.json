@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "defaultProfile": "auto",
+  "defaultSensitivity": "balanced",
+  "profiles": {
+    "momentum": {
+      "maxSpreadBps": 12,
+      "minBuyShare": 0.54,
+      "minImbalance": 0.06,
+      "minMomentum1mBps": 0.1,
+      "minMomentum5mBps": 0.25,
+      "minSignals": 2
+    },
+    "mean-reversion": {
+      "maxSpreadBps": 10,
+      "minBuyShare": 0.53,
+      "minImbalance": 0.05,
+      "minMomentum1mBps": 0.1,
+      "minMomentum5mBps": 0,
+      "maxPullback5mBps": -0.5,
+      "minSignals": 2
+    },
+    "breakout": {
+      "maxSpreadBps": 14,
+      "minBuyShare": 0.56,
+      "minImbalance": 0.1,
+      "minMomentum1mBps": 0.2,
+      "minMomentum5mBps": 1,
+      "minSignals": 2
+    }
+  },
+  "adaptation": {
+    "wideSpreadBps": 18,
+    "fastVolatilityBps": 6,
+    "extremeVolatilityBps": 20,
+    "trendMomentum5mBps": 0.5,
+    "breakoutMomentum5mBps": 2,
+    "reversalPullback5mBps": -0.5
+  }
+}

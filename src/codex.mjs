@@ -13,11 +13,12 @@ export function safeEnv(input=process.env) {
  const allow=new Set(['PATH','PATHEXT','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','USERPROFILE','HOME','APPDATA','LOCALAPPDATA','CODEX_HOME']);
  return Object.fromEntries(Object.entries(input).filter(([k])=>allow.has(k.toUpperCase())));
 }
-export async function analyze(snapshot,policy,account={trades:[]},{timeoutMs=180000,forceHold=false,signal}={}) {
+export async function analyze(snapshot,policy,account={trades:[]},{timeoutMs=180000,forceHold=false,signal,purpose='standard',proposalSchemaOverride}={}) {
  const runDir=join(RESEARCH,'runs',randomUUID()); await mkdir(runDir,{recursive:true});
  const schema=join(runDir,'schema.json'), output=join(runDir,'proposal.json');
- await writeJson(schema,z.toJSONSchema(proposalSchema(policy)));
- const {prompt,metadata}=await buildAnalystPrompt({snapshot,policy,account,forceHold});
+ const outputSchema=proposalSchemaOverride??proposalSchema(policy);
+ await writeJson(schema,z.toJSONSchema(outputSchema));
+ const {prompt,metadata}=await buildAnalystPrompt({snapshot,policy,account,forceHold,purpose});
  metadata.requestedModel=RESEARCH_MODEL;
  await writeJson(join(runDir,'analysis.json'),metadata);
  const executable=process.platform==='win32'?'codex.exe':'codex';
@@ -41,7 +42,7 @@ export async function analyze(snapshot,policy,account={trades:[]},{timeoutMs=180
   child.stdin.on('error',()=>{});
   child.stdin.end(prompt);
  });
- const proposal=proposalSchema(policy).parse(JSON.parse(await readFile(output,'utf8')));
+ const proposal=outputSchema.parse(JSON.parse(await readFile(output,'utf8')));
  if(proposal.snapshotId!==snapshot.id) throw new Error('CODEX_SNAPSHOT_MISMATCH');
  if(forceHold && proposal.action!=='hold') throw new Error('CODEX_SMOKE_NOT_HOLD');
  return {proposal,runDir,metadata};

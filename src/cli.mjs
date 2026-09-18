@@ -66,6 +66,7 @@ async function doctor(){
  return report;
 }
 async function watch(){
+ if(await exists(join(LOCAL,'TRADING_DISABLED')))return {status:'trading_disabled',message:'本機交易已停用；未啟動研究排程或進場流程。'};
  return lock(join(LOCAL,'watch.lock'),async()=>{
   // One startup marker records the user's requested continuous operation.
   // STOP pauses this entry watcher, while the separate engine supervisor can

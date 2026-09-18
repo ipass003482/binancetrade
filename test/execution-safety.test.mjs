@@ -35,6 +35,14 @@ test('STOP during final identity read prevents the POST and records definite rej
  assert.deepEqual((await journalRead(join(local,'orders.jsonl'))).map(r=>r.status),['pending','rejected']);
 });
 
+test('local trading-disabled marker rejects entry before any quote or order request',async()=>{
+ const f=await fixture(),local=await temp();await writeFile(join(local,'TRADING_DISABLED'),'LOCAL_TRADING_DISABLED=1');let quotes=0,posts=0;
+ const client={snapshot:async()=>f.account,submit:async()=>{posts++;}};
+ await assert.rejects(execute({...f,local,client,now:()=>f.now,getQuote:async()=>{quotes++;return f.executionQuote;}}),/LOCAL_TRADING_DISABLED/);
+ assert.equal(quotes,0);assert.equal(posts,0);
+ assert.equal((await journalRead(join(local,'orders.jsonl'))).at(-1).reason,'LOCAL_TRADING_DISABLED');
+});
+
 test('changed engine exit settings after analysis cannot inherit an earlier entry fingerprint',async()=>{
  const f=await fixture(),local=await temp(),engine={...engineConfig(f.policy),minimal_roi:{'0':0.03}};let posts=0;
  const client=new FreqtradeClient(f.policy,{}, {fetchImpl:async(u,o)=>{

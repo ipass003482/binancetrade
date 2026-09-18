@@ -1,3 +1,4 @@
+const themeLink=document.createElement('link');themeLink.rel='stylesheet';themeLink.href='/starfield.css';document.head.append(themeLink);
 import { DashboardStore } from './store.mjs';
 import { timingView } from './timing.mjs';
 const $=id=>document.getElementById(id),query=new URLSearchParams(location.search),initialMode=['dry-run','demo','demo-futures'].includes(query.get('mode'))?query.get('mode'):'dry-run',store=new DashboardStore();
@@ -7,6 +8,7 @@ const clock=v=>v?new Date(v).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'
 const dateTime=v=>v?new Date(v).toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—';
 const text=(id,value)=>{$(id).textContent=value;};
 const element=(tag,cls,value)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(value!==undefined)e.textContent=value;return e;};
+const safetyBanner=(()=>{const banner=element('div','safety-banner');banner.id='local-safety';banner.setAttribute('role','alert');const icon=element('span','safety-icon','✦'),copy=element('div','safety-copy');copy.append(element('strong','', '本機交易已停用'),element('span','', '此 Dashboard 僅供唯讀研究與展示；新進場請求會被本機安全鎖拒絕。'));banner.append(icon,copy,element('code','safety-badge','READ-ONLY'));document.querySelector('.notice')?.after(banner);const heading=document.querySelector('#help h2');heading?.after(element('p','dialog-lock-notice','這台電腦已啟用唯讀保護。不要啟動交易引擎或研究排程；畫面仍可用於查看固定展示資料。'));return banner;})();
 const actions=['buy','sell','hold','open-long','open-short','close-long','close-short'];
 const positionLabel=p=>p.pair+(p.leverage!==undefined?' · '+(p.isShort?'空':'多')+' '+p.leverage+'×':'')+(p.sessionStatus==='outside_session'?' · 輪前持倉':p.sessionStatus==='unknown'?' · 開倉時間待核對':'');
 const taipeiTime=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))?
@@ -304,7 +306,7 @@ function render(){
  renderOperations();
  renderDiagnostics();
  renderPortfolio();
- const {data,market,preview,mode,loading,error,marketError}=store.state;
+ const {data,market,preview,mode,loading,error,marketError,tradingDisabled}=store.state;
  text('session-scope',preview?'展示資料 · 非本輪成交':data?.session?'本驗證輪開始 '+new Date(data.session.startedAt).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false})+'（台灣時間）· 僅統計此後開倉的 Demo 成交；交易所餘額未重置':data?mode==='dry-run'?'此處為 Dry-run；Demo 驗證轮起點另見下方損益範圍':'未設定驗證輪起點 · 依現有資料範圍顯示':'等待驗證輪資料');
  text('pnl-label',data?.session?'本驗證輪已實現':'引擎歷史已實現');
  text('pnl-scope',data?.session?'本輪各版本／驗證單 · 已含費用':'含舊版策略／驗證單 · 已含費用');
@@ -316,11 +318,11 @@ function render(){
  text('research-market-label',futures?'Binance Demo 永續 · 公開資料':'Binance Spot · 公開資料');
  text('exposure-label',futures?'保證金使用':'曝險使用');text('exposure-limit-label',futures?'總保證金上限':'總曝險上限');text('stake-label',futures?'單筆保證金上限':'單筆投入上限');
  $('futures-limits').hidden=!futures;text('notional-limit','最高 '+(data?.policy?.maxLeverage??3)+'× · 單筆 '+(data?.policy?.maxNotionalUsdt??150)+' / 合計 '+(data?.policy?.maxTotalNotionalUsdt??150)+' USDT');
- document.body.classList.toggle('is-preview',preview);$('refresh').disabled=loading;text('refresh',loading?'…':'↻');$('preview').setAttribute('aria-pressed',String(preview));text('preview',preview?'離開展示 ↗':'開啟展示 ↗');
- text('source-label',preview?'EXHIBITION / SAMPLE DATA':futures?'DEMO FUTURES / ISOLATED / MAX '+(data?.policy?.maxLeverage??'—')+'×':mode==='demo'?'BINANCE DEMO / VIRTUAL':'DRY-RUN / LOCAL');
+ document.body.classList.toggle('is-preview',preview);document.body.classList.toggle('is-readonly',tradingDisabled===true);$('refresh').disabled=loading;text('refresh',loading?'…':'↻');$('preview').setAttribute('aria-pressed',String(preview));text('preview',preview?'離開展示 ↗':'開啟展示 ↗');
+ text('source-label',tradingDisabled?'READ-ONLY / LOCAL LOCK':preview?'EXHIBITION / SAMPLE DATA':futures?'DEMO FUTURES / ISOLATED / MAX '+(data?.policy?.maxLeverage??'—')+'×':mode==='demo'?'BINANCE DEMO / VIRTUAL':'DRY-RUN / LOCAL');
  const strategyNote=data?.strategy?.decisionEngine==='rules'?(data.strategy.rulesReady?'新版突破策略已載入':'新版突破策略等待引擎載入')+' · '+
   (entryStateLabels[data.operations?.entryState]??(data.stopped?'進場已暫停':'排程狀態待確認'))+' · 每 30 秒更新':'唯讀監看 · 每 30 秒更新';
- text('notice',preview?'展示中的行情、績效與提案皆為範例。':error??(data?.engineError?'帳戶尚未連線或驗證未通過；公開行情可獨立查看。':data?strategyNote:'正在讀取工作區…'));
+ text('notice',tradingDisabled?'本機已停用交易：此 Dashboard 僅提供唯讀研究與展示，所有新進場請求都會被安全鎖拒絕。':preview?'展示中的行情、績效與提案皆為範例。':error??(data?.engineError?'帳戶尚未連線或驗證未通過；公開行情可獨立查看。':data?strategyNote:'正在讀取工作區…'));
  document.querySelector('.account-band .summary-item > span').firstChild.nodeValue=(preview?'示例資產':'策略資產')+' ';text('balance',number(data?.account?.total));text('balance-note',preview?'示例帳戶 · 非實際資金':data?.account?'Demo 帳戶總值 '+number(data.account.accountTotal)+' USDT':'等待引擎連線');
  const pnl=data?.summary?.netRealizedUsdt;text('pnl',signed(pnl));$('pnl').className=pnl===null||pnl===undefined?'':Number(pnl)>=0?'positive':'negative';
  const positions=data?.account?.positions??[],max=data?.policy?.maxExposureUsdt??'50',used=data?.account?positions.reduce((sum,p)=>sum+Number(p.stake??0),0):null,ratio=used===null?0:Math.max(0,Math.min(100,used/Number(max)*100));
@@ -353,15 +355,15 @@ setInterval(()=>{if(!document.hidden&&!store.state.preview&&!store.state.loading
 
 
 function renderConnection(){
- const {data,preview,loading,mode,error}=store.state,suffix=mode!=='dry-run'?' --mode '+mode:'';
+ const {data,preview,loading,mode,error,tradingDisabled}=store.state,suffix=mode!=='dry-run'?' --mode '+mode:'';
  text('setup-command','node src/cli.mjs setup'+suffix);text('engine-command','node src/cli.mjs engine'+suffix);text('cycle-command','node src/cli.mjs cycle'+suffix);$('credential-step').hidden=mode==='dry-run';text('credential-command','powershell.exe -NoProfile -File scripts/configure-demo.ps1 -Mode '+(mode==='demo-futures'?'demo-futures':'demo'));
  text('setup-status',preview?'展示中':data?.setup?.configured?'設定檔已建立':data?'尚未建立':'尚未檢查');
  text('credential-status',preview?'展示中':data?.setup?.credentialsPresent?'已找到加密金鑰檔':'尚未設定');
  text('engine-status',preview?'展示中':data?.account?'引擎身分已驗證':data?'尚未連線':'尚未檢查');
  text('sync-status',preview?'展示中':data?.account?(data.historyError?'帳戶已讀取，交易紀錄待確認':'帳戶及紀錄已同步'):'等待引擎連線');
- text('header-connection',preview?'設定交易連線':data?.account?'引擎已連線':'連接工作區');
- $('check-connection').disabled=loading;text('check-connection',loading?'正在檢查…':'檢查連線');
- const result=preview?'目前為展示模式。檢查連線會切換到所選環境，讀取本地引擎。':error??(loading?'正在檢查所選環境…':data?.account?(data.historyError?'帳戶與持倉已連上；交易歷史本次讀取失敗，請稍後重試。':'已驗證引擎身分，帳戶、持倉與交易紀錄已讀取。'):mode!=='dry-run'&&data?.setup?.configured&&!data?.setup?.credentialsPresent?'工作區已建立。請先在本機設定 Demo 金鑰，再啟動 Freqtrade。':data?.setup?.configured?'工作區設定已存在。請啟動上方對應的 Freqtrade 指令，再檢查一次。':'請先在專案目錄執行工作區設定，再啟動引擎。');
+ text('header-connection',tradingDisabled?'本機交易已停用':preview?'設定交易連線':data?.account?'引擎已連線':'連接工作區');
+ $('mode').disabled=tradingDisabled===true;$('check-connection').disabled=tradingDisabled===true||loading;text('check-connection',tradingDisabled?'本機已停用交易':loading?'正在檢查…':'檢查連線');
+ const result=tradingDisabled?'本機唯讀模式已啟用。此頁不會啟動引擎、不會執行週期，也不會送出新進場訂單。':preview?'目前為展示模式。檢查連線會切換到所選環境，讀取本地引擎。':error??(loading?'正在檢查所選環境…':data?.account?(data.historyError?'帳戶與持倉已連上；交易歷史本次讀取失敗，請稍後重試。':'已驗證引擎身分，帳戶、持倉與交易紀錄已讀取。'):mode!=='dry-run'&&data?.setup?.configured&&!data?.setup?.credentialsPresent?'工作區已建立。請先在本機設定 Demo 金鑰，再啟動 Freqtrade。':data?.setup?.configured?'工作區設定已存在。請啟動上方對應的 Freqtrade 指令，再檢查一次。':'請先在專案目錄執行工作區設定，再啟動工作區。');
  text('connection-result',result);
  for(const dot of document.querySelectorAll('.status-dot'))dot.style.background=!preview&&data?.account?'#63a18d':'#b6bfcc';
  text('flow-market','Demo 成交與前五檔深度');text('flow-proposal','鏈上背景與模型，獨立記錄');text('flow-engine','Freqtrade 下單與持倉保護');

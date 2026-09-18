@@ -34,6 +34,14 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
   const latest=new Map(records.map(r=>[r.id,r]));
   if([...latest.values()].some(r=>['pending','unknown'].includes(r.status))) throw new Error('UNRESOLVED_SUBMISSION: reconcile before more orders');
   proposalSchema(policy).parse(proposal);
+  const entryStopReason=async()=>await exists(join(local,'TRADING_DISABLED'))?'LOCAL_TRADING_DISABLED':await exists(join(local,'STOP'))?'ENTRY_STOPPED_BEFORE_SEND':null;
+  if(isEntry(proposal.action)){
+   const reason=await entryStopReason();
+   if(reason){
+    await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,reason});
+    throw new Error(reason);
+   }
+  }
   const volumeExperiment=policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules'&&!probePermitId?
    assertVolumeAssignment(snapshot,await getVolumeConfig()):null;
   if(volumeExperiment&&!probePermitId)throw Error('MODEL_VOLUME_EXPERIMENT_NOT_SUPPORTED');
@@ -129,13 +137,17 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
     snapshotId:snapshot.id,tag,...(executionPolicyVersion?{executionPolicyVersion}:{}),tradeId:decision.tradeId??null,...(rulePlan?{purpose:rulePlan.purpose,ruleVersion:rulePlan.strategyVariant??rulePlan.ruleVersion,volumeExperiment:rulePlan.volumeExperiment??null,...(rulePlan.entryEvidence?{entrySignalEngine:rulePlan.entrySignalEngine,entryEvidence:rulePlan.entryEvidence,entryPolicyVersion:rulePlan.entryPolicyVersion,...(rulePlan.executionQualityVersion?{executionQualityVersion:rulePlan.executionQualityVersion}:{}),...(rulePlan.entryConfirmation?.entryRoute?{entryRoute:rulePlan.entryConfirmation.entryRoute}:{}),riskPolicy:rulePlan.riskPolicy,strategyFingerprint:entryVersion.fingerprint}:{})}:{}),...(isFutures(policy.mode)?{leverage:proposal.leverage}:{})});
   let nativeAttempt,submissionResponded=false;
   try {
-   if(isEntry(proposal.action) && await exists(join(local,'STOP'))) {
-    await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',reason:'ENTRY_STOPPED_BEFORE_SEND'});
-    throw new Error('ENTRY_STOPPED_BEFORE_SEND');
+   if(isEntry(proposal.action)){
+    const reason=await entryStopReason();
+    if(reason){
+     await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',reason});
+     throw new Error(reason);
+    }
    }
    const result=await client.submit(proposal,tag,decision.tradeId,{beforeSend:async engine=>{
     if(isEntry(proposal.action)){
-     if(await exists(join(local,'STOP')))throw Error('ENTRY_STOPPED_BEFORE_SEND');
+     const finalReason=await entryStopReason();
+     if(finalReason)throw Error(finalReason);
      if(rulePlan&&engine.strategy_version!==RULE_ENGINE_VERSION)throw Error('RULE_ENGINE_RESTART_REQUIRED');
      if(!probePermit&&policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules')assertVolumeAssignment(snapshot,await getVolumeConfig());
      if(portfolioCheckedAt!==undefined&&(now()-portfolioCheckedAt>15000||now()<portfolioCheckedAt))throw Error('PORTFOLIO_ACCOUNT_STALE');
@@ -160,7 +172,8 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
       await writeJson(join(local,'entry-plans',tag+'.json'),rulePlan);
       nativeAttempt={mode:policy.mode,processId:nativeProtection?.engineProcessId,startedAt:now(),planSha256:entryPlanDigest(rulePlan)};
      }
-     if(await exists(join(local,'STOP')))throw Error('ENTRY_STOPPED_BEFORE_SEND');
+     const reason=await entryStopReason();
+     if(reason)throw Error(reason);
      return check;
     }
    },validUntil:Math.min(
@@ -188,7 +201,7 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
     }
    }
    if(e.submissionStarted===false||e.message==='ORDER_DEADLINE_EXPIRED')await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',reason:e.message});
-   else if(e.message!=='ENTRY_STOPPED_BEFORE_SEND')
+   else if(!['ENTRY_STOPPED_BEFORE_SEND','LOCAL_TRADING_DISABLED'].includes(e.message))
     await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'unknown',action:proposal.action,tag,reason:'Submission outcome requires reconciliation'});
    throw e;
   }
