@@ -101,7 +101,7 @@ function observerProposal(raw){
 
 export async function runHighFrequencyCycle(options={}){
  const {local=join(LOCAL,'ai-high-frequency'),collectFn=collectHighFrequencySnapshot,analyzeFn=analyze,fetchImpl=fetch,signal,now=Date.now,
-  strategyConfig,strategyProfile,sensitivity}=options;
+  strategyConfig,strategyProfile,sensitivity,includeSnapshot=false}=options;
  const policy=options.policy??await loadPolicy('dry-run');
  if(policy.mode!=='dry-run')throw new Error('HIGH_FREQUENCY_RESEARCH_DRY_RUN_ONLY');
  const startedAt=new Date(now()).toISOString(),snapshot=await collectFn({fetchImpl,now:now()});
@@ -117,7 +117,8 @@ export async function runHighFrequencyCycle(options={}){
   snapshotId:snapshot.id,marketCount:snapshot.markets.length,errors:snapshot.errors,proposal,rawProposal:analysis.proposal,
   strategy:{version:strategyPlan.version,profile:strategyPlan.profile,sensitivity:strategyPlan.sensitivity,selected:strategyPlan.selected,candidateCount:strategyPlan.candidates.length,
    aiControl:rawControl,applied:controlledPlan?controlledPlan.selected:null},
-  model:analysis.metadata?.requestedModel??null,purpose:analysis.metadata?.purpose??'high-frequency-cli',runDir:analysis.runDir};
+   model:analysis.metadata?.requestedModel??null,purpose:analysis.metadata?.purpose??'high-frequency-cli',runDir:analysis.runDir,
+   ...(includeSnapshot?{snapshot:plannedSnapshot}: {})};
  await writeJson(join(local,'runs',snapshot.id+'.result.json'),result);
  await writeJson(join(local,'latest.json'),result);
  return result;

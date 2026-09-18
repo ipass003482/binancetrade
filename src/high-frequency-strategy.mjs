@@ -15,9 +15,12 @@ export const HighFrequencyStrategySchema=z.object({
  defaultSensitivity:z.enum(['conservative','balanced','aggressive']),profiles:z.object({
   momentum:profileSchema,'mean-reversion':profileSchema,breakout:profileSchema
  }).strict(),adaptation:z.object({
-  wideSpreadBps:finite.positive().max(100),fastVolatilityBps:finite.positive().max(100),
-  extremeVolatilityBps:finite.positive().max(200),trendMomentum5mBps:finite.min(0).max(100),
-  breakoutMomentum5mBps:finite.min(0).max(100),reversalPullback5mBps:finite.min(-100).max(0)
+ wideSpreadBps:finite.positive().max(100),fastVolatilityBps:finite.positive().max(100),
+ extremeVolatilityBps:finite.positive().max(200),trendMomentum5mBps:finite.min(0).max(100),
+ breakoutMomentum5mBps:finite.min(0).max(100),reversalPullback5mBps:finite.min(-100).max(0)
+ }).strict(),shadow:z.object({
+  intervalSeconds:z.number().int().min(15).max(3600),aiReviewEveryCycles:z.number().int().min(1).max(100),
+  horizonSeconds:z.array(z.number().int().min(15).max(3600)).min(1).max(3),maxPending:z.number().int().min(1).max(256)
  }).strict()
 }).strict();
 

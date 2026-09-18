@@ -36,5 +36,11 @@
     "trendMomentum5mBps": 0.5,
     "breakoutMomentum5mBps": 2,
     "reversalPullback5mBps": -0.5
+  },
+  "shadow": {
+    "intervalSeconds": 60,
+    "aiReviewEveryCycles": 5,
+    "horizonSeconds": [60],
+    "maxPending": 128
   }
 }

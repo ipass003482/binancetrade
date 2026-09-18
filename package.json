@@ -12,6 +12,7 @@
     "research": "node src/cli.mjs research",
     "analyze": "node src/cli.mjs analyze",
     "ai:high-frequency": "node scripts/ai-high-frequency.mjs",
+    "ai:high-frequency-shadow": "node scripts/ai-high-frequency-shadow.mjs",
     "cycle": "node src/cli.mjs cycle",
     "watch": "node src/cli.mjs watch",
     "status": "node src/cli.mjs status",
