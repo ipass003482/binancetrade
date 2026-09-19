@@ -219,6 +219,22 @@ def test_uncertain_stop_can_be_adopted_only_by_matching_client_identity(native):
     assert native.wire[-1][3].get('clientAlgoId' if native.futures else 'origClientOrderId') == attempt['clientOrderId']
 
 
+def test_protection_state_replace_retries_transient_windows_lock(native, monkeypatch):
+    state = native.exchange._read_protection()
+    original_replace = protection.os.replace
+    calls = []
+
+    def flaky_replace(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 1:
+            raise PermissionError('transient readiness-file lock')
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(protection.os, 'replace', flaky_replace)
+    native.exchange._write_protection(state)
+    assert len(calls) == 2
+
+
 def test_definitive_exchange_rejection_is_visible_and_retains_native_emergency_exit(native):
     native.replies.append(ccxt.InvalidOrder('Not supported'))
     with pytest.raises(InvalidOrderException):

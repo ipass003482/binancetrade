@@ -21,6 +21,7 @@ import { isEntry } from './mode.mjs';
 import {runEntryBatch} from './batch-entry.mjs';
 import {loadVolumeExperiment,volumeAssignment} from './volume-experiment.mjs';
 import {enqueueInitialSpotCandidates} from './spot-candidate-store.mjs';
+import {waitForModelEvidence} from './model-entry.mjs';
 export async function runCycle({local,policy,client,signal,scheduledCandleBoundary,scheduledDecisionBoundary,collectFn=collect,analyzeFn=analyze,executeFn=execute,costsFn=collectCosts}){
  return lock(join(local,'cycle.lock'),async()=>{
   if(await exists(join(local,'STOP')))return {status:'stopped',message:'Entries paused; engine exits remain active'};
@@ -37,7 +38,9 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
    snapshot=await collectFn(policy,{includeWeb3:!useRules});
    attachCosts(snapshot,costs,await loadCosts());
    snapshot.decisionEngine=useRules?'rules':'ai';
-   if(useRules){snapshot.ruleVersion=decisionConfig.ruleVersion;snapshot.entrySignalEngine='sampled_order_flow';}
+   const futuresAiAssist=useRules&&policy.mode==='demo-futures';
+   if(futuresAiAssist)snapshot.aiAssist={version:'futures-kronos-flow-v1',enabled:true,scope:'futures-entry-direction-veto',model:'kronos-small-pretrained-v1'};
+   if(useRules){snapshot.ruleVersion=decisionConfig.ruleVersion;snapshot.entrySignalEngine=futuresAiAssist?'sampled_order_flow+kronos_advisory':'sampled_order_flow';}
    if(useRules)snapshot.volumeExperiment=volumeAssignment(snapshot.candleBoundary,await loadVolumeExperiment());
    if(scheduledCandleBoundary!==undefined){
     verifyScheduledCandles(snapshot,scheduledCandleBoundary);
@@ -61,7 +64,7 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
      decision?.deadline??(Number.isSafeInteger(boundary)?boundary+timeframeSpec(snapshot.timeframe).ms:Infinity))).toISOString()};
    await healthUpdate(local,{stage:'analyzing',snapshotId:snapshot.id,timing});
    const recentHistory=useRules&&typeof client.history==='function'?await client.history():[];
-   const modelEvidence=useRules?{status:'observation_only',entryAllowed:null,usedForEntryDecision:false,reason:'ORDER_FLOW_ONLY_NO_MODEL_WAIT'}:undefined;
+   const modelEvidence=useRules?(futuresAiAssist?await waitForModelEvidence({snapshot,local,signal}):{status:'observation_only',entryAllowed:null,usedForEntryDecision:false,reason:'ORDER_FLOW_ONLY_NO_MODEL_WAIT'}):undefined;
    if(useRules)await writeJson(join(local,'runs',snapshot.id+'.model-decision.json'),modelEvidence);
    const reference=rulesProposal(snapshot,policy,account,modelEvidence,{recentHistory,now:Date.parse(snapshot.completedAt??snapshot.createdAt)});
    await writeJson(join(local,'runs',snapshot.id+'.rules.json'),reference);

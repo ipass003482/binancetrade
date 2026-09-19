@@ -49,7 +49,7 @@ export async function runEntryBatch({reference,snapshot,policy,client,local,mode
    if(n>0)await save(join(local,'runs',stem+'.proposal.json'),proposal);
    const attempt={pair:proposal.pair,proposal,artifactStem:stem,startedAt:new Date().toISOString(),status:'executing'};
    attempts.push(attempt);await persist({status:'executing'});
-   const result=await executeFn({proposal,snapshot,policy,client,local,strategyVersion,executionPolicyVersion:BATCH_EXECUTION_VERSION});
+   const result=await executeFn({proposal,snapshot,policy,client,local,modelEvidence,strategyVersion,executionPolicyVersion:BATCH_EXECUTION_VERSION});
    attempt.status=result.status;attempt.result=result;await persist({status:'executing'});
    if(!['submitted','filtered','hold'].includes(result.status))throw Error('BATCH_UNEXPECTED_OUTCOME');
    if(!['submitted','filtered'].includes(result.status))break;

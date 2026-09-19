@@ -148,6 +148,21 @@ test('flow-only ignores absent/contrary model and opposing candle trends, but st
   const book=a.snapshot.markets[0].orderFlow.books[0];
   const quote=short?{bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)}:undefined;
   assert.equal(orderFlowRuleDecision({...a,quote,cost:{...a.cost,requiredPriceSpaceBps:'9999'}}).action,'hold');
-  a.snapshot.markets[0].orderFlow=null;assert.equal(orderFlowRuleDecision(a).action,'hold');
+ a.snapshot.markets[0].orderFlow=null;assert.equal(orderFlowRuleDecision(a).action,'hold');
  }
+});
+test('futures AI assist requires Kronos direction agreement while spot flow remains independent',()=>{
+ const a=args(true),book=a.snapshot.markets[0].orderFlow.books[0];
+ a.snapshot.aiAssist={version:'futures-kronos-flow-v1',enabled:true,scope:'futures-entry-direction-veto'};
+ const quote={bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)};
+ const aligned=orderFlowRuleDecision({...a,quote});
+ assert.equal(aligned.action,'open-short');assert.equal(aligned.aiAssist.version,'futures-kronos-flow-v1');
+ assert.equal(aligned.aiAssist.direction,'short');assert.equal(aligned.aiAssist.usedForEntryDecision,true);
+ const opposite=structuredClone(a);
+ const origin=Number(opposite.modelEvidence.prediction.forecasts[0].originClose);
+ opposite.modelEvidence.prediction.forecasts[0].forecastCloses=[origin+.01,origin+.02,origin+.03].map(String);
+ const veto=orderFlowRuleDecision({...opposite,quote});
+ assert.equal(veto.action,'hold');assert.ok(veto.directionChecks.find(c=>c.action==='open-short').reasons.includes('MODEL_DIRECTION_DISAGREES'));
+ const missing=orderFlowRuleDecision({...a,modelEvidence:null,quote});
+ assert.equal(missing.action,'hold');assert.ok(missing.directionChecks.find(c=>c.action==='open-short').reasons.includes('MODEL_EVIDENCE_UNAVAILABLE'));
 });

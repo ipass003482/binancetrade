@@ -41,6 +41,7 @@ _GUARD_KEYS = {'version', 'snapshotId', 'mode', 'pair', 'side', 'modelFingerprin
                'forecastCloses', 'originClose', 'atr15', 'targetAtr', 'targetFraction'}
 _HEX = re.compile(r'[a-f0-9]{64}')
 _UUID = re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}')
+FUTURES_MODEL_ASSIST_VERSION = 'futures-kronos-flow-v1'
 
 
 def wall_ms():
@@ -122,6 +123,33 @@ def _entry_tag(plan, pair):
         reject('EXECUTION_IDENTITY')
     payload = json.dumps([version, snapshot, pair], separators=(',', ':')) if version else snapshot
     return 'codex-' + sha256(payload.encode()).hexdigest()[:32]
+
+
+def _validate_futures_model_assist(ai, mode, pair, side, snapshot_id):
+    """Validate the optional host-side Kronos direction veto in a flow plan.
+
+    The producer remains advisory and never sends an order.  Native code only
+    checks the compact, immutable evidence copied into the entry plan; flow,
+    price, cost, risk and protection checks below remain the actual authority.
+    """
+    if (mode != 'demo-futures' or not isinstance(ai, dict)
+            or ai.get('version') != FUTURES_MODEL_ASSIST_VERSION
+            or ai.get('usedForEntryDecision') is not True
+            or ai.get('snapshotId') != snapshot_id
+            or ai.get('direction') != side
+            or not isinstance(ai.get('modelFingerprint'), str) or not _HEX.fullmatch(ai['modelFingerprint'])
+            or not isinstance(ai.get('predictionSha256'), str) or not _HEX.fullmatch(ai['predictionSha256'])
+            or not isinstance(ai.get('issuedAt'), str)
+            or not isinstance(ai.get('originClose'), str)
+            or not isinstance(ai.get('forecastCloses'), list) or len(ai['forecastCloses']) != 3):
+        reject('MODEL_ASSIST_IDENTITY')
+    origin = decimal(ai['originClose'], True)
+    closes = [decimal(value, True) for value in ai['forecastCloses']]
+    if any((value <= origin if side == 'long' else value >= origin) for value in closes):
+        reject('MODEL_ASSIST_DIRECTION')
+    move = decimal(ai.get('forecastMoveBps'), signed=True)
+    if move <= 0:
+        reject('MODEL_ASSIST_MOVE')
 
 
 def _guard(plan, mode, pair, side):
@@ -271,6 +299,8 @@ def _flow_guard(plan, mode, pair, side):
     raw = json.dumps(c['orderFlow'], separators=(',',':'), ensure_ascii=False)
     if sha256(raw.encode()).hexdigest() != evidence['proofSha256']:
         reject('FLOW_PROOF_HASH')
+    if evidence.get('aiAssist') is not None:
+        _validate_futures_model_assist(evidence['aiAssist'], mode, pair, side, g['snapshotId'])
     try:
         validate_flow(c['orderFlow'],mode,pair,side,timestamp(g['quoteFetchedAt']))
     except Exception:
@@ -434,7 +464,8 @@ def _validate(permit, now, mono):
             reject('FLOW_EVIDENCE')
     mode, plan = permit['mode'], permit['plan']
     model = plan['ruleVersion'] == RULE_VERSION
-    _stopped(mode, model and plan.get('entryPolicyVersion') != 'order-flow-only-v1')
+    ai_assist = plan.get('entryEvidence', {}).get('aiAssist') if isinstance(plan.get('entryEvidence'), dict) else None
+    _stopped(mode, model and (plan.get('entryPolicyVersion') != 'order-flow-only-v1' or isinstance(ai_assist, dict)))
     if abs((now - permit['wall']) - (mono - permit['mono'])) > 250:
         reject('CLOCK_JUMP')
     if not 0 <= now - timestamp(plan['createdAt']) <= 120000:

@@ -9,6 +9,11 @@ export const SPOT_FLOW_CONTINUATION_VERSION='flow-price-continuation-v1';
 export const FUTURES_FLOW_CONTINUATION_VERSION='flow-futures-price-continuation-v1';
 export const FLOW_POLICY='trend-pullback-flow-v1';
 export const FLOW_VERSION='sampled-demo-flow-v1';
+// Futures-only advisory route: the pinned Kronos observer may veto a flow
+// direction, but it never replaces the native flow, cost, sizing or protection
+// checks. Spot remains on the existing order-flow-only route so the new cohort
+// can be measured separately.
+export const FUTURES_MODEL_ASSIST_VERSION='futures-kronos-flow-v1';
 // A negative Demo fill is evidence that the immediately sampled direction
 // failed for that pair. Block only that pair for a short, bounded period;
 // other pairs remain eligible and this is not a profitability claim.

@@ -1,7 +1,7 @@
 // Live Demo forward trial. Historical v3 remains immutable in baseline.mjs;
 // the original candidate B is retained below for reproducible v4 evidence.
 import Decimal from 'decimal.js';
-import {FLOW_POLICY,FLOW_ONLY_POLICY,FLOW_SELECTIVITY,assessOrderFlow,assessSpotFlowContinuation,assessFuturesFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,FUTURES_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
+import {FLOW_POLICY,FLOW_ONLY_POLICY,FLOW_SELECTIVITY,FUTURES_MODEL_ASSIST_VERSION,assessOrderFlow,assessSpotFlowContinuation,assessFuturesFlowContinuation,SPOT_FLOW_CONTINUATION_VERSION,FUTURES_FLOW_CONTINUATION_VERSION,SPOT_FLOW_QUALITY_VERSION,SPOT_FLOW_EXIT_POLICY} from './order-flow.mjs';
 import { baselineDecision } from './baseline.mjs';
 import { evaluateEntryQuality } from './entry-quality.mjs';
 import { isEntry } from './mode.mjs';
@@ -300,11 +300,43 @@ export function evaluateFlowEntryQuality(snapshot,proposal,now){
  const q=evaluateModelEntryQuality(snapshot,proposal,now);
  return {...q,metrics:q.metrics?{...q.metrics,entrySignalEngine:'sampled_order_flow',technicalIndicatorsRole:'atr_risk_only'}:null};
 }
-export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}={}){
+
+// The forecast producer is deliberately kept advisory-only.  This host-side
+// check is the small bridge between that evidence and the live futures flow
+// route: the three forecast closes must stay on the same side of the exact
+// origin close as the proposed futures direction.  The native flow guard,
+// costs, sizing, clock and protection checks remain authoritative.
+function futuresModelAssist({snapshot,pair,modelEvidence,long}){
+ const unavailable=reason=>({version:FUTURES_MODEL_ASSIST_VERSION,eligible:false,reason,usedForEntryDecision:true});
+ try{
+  if(modelEvidence?.status!=='ok'||modelEvidence.entryAllowed!==true)
+   return unavailable(modelEvidence?.reason??'MODEL_EVIDENCE_UNAVAILABLE');
+  const market=snapshot.markets?.find(m=>m.pair===pair),row=modelEvidence.prediction?.forecasts?.find(f=>f.pair===pair);
+  if(!market||!row||!Array.isArray(row.forecastCloses)||row.forecastCloses.length!==3)
+   return unavailable('MODEL_PAIR_FORECAST_UNAVAILABLE');
+  const origin=new Decimal(market.candles?.at(-1)?.close),rowOrigin=new Decimal(row.originClose);
+  const path=row.forecastCloses.map(value=>new Decimal(value));
+  if(!origin.isFinite()||origin.lte(0)||!rowOrigin.isFinite()||!origin.eq(rowOrigin)||path.some(v=>!v.isFinite()||v.lte(0)))
+   return unavailable('MODEL_PRICE_INVALID');
+  const pathLong=path.every(value=>value.gt(origin)),pathShort=path.every(value=>value.lt(origin));
+  if(!pathLong&&!pathShort)return unavailable('MODEL_DIRECTION_PATH_INCONSISTENT');
+  const direction=long?'long':'short',expected=long?pathLong:pathShort,target=path.at(-1);
+  const move=target.div(origin).minus(1).mul(long?10000:-10000);
+  return {version:FUTURES_MODEL_ASSIST_VERSION,eligible:expected,
+   reason:expected?null:'MODEL_DIRECTION_DISAGREES',usedForEntryDecision:true,direction,
+   snapshotId:snapshot.id,modelFingerprint:modelEvidence.modelFingerprint??null,
+   predictionSha256:modelEvidence.predictionSha256??null,issuedAt:modelEvidence.prediction?.issuedAt??null,
+   originClose:origin.toFixed(),forecastCloses:path.map(value=>value.toFixed()),forecastClose:target.toFixed(),
+   forecastMoveBps:move.toFixed(),directionPolicy:'all-three-same-side-of-origin'};
+ }catch{return unavailable('MODEL_PRICE_INVALID');}
+}
+
+export function orderFlowRuleDecision({snapshot,pair,cost,quote,modelEvidence,now=Date.now()}={}){
  const {mode,timeframe}=snapshot??{},directionChecks=[];
  let flowDiagnostics=null,adaptiveParameters=null;
  const executionQualityVersion=mode==='demo'?SPOT_FLOW_QUALITY_VERSION:null;
- const hold=reasons=>({version:DEMO_RULE_VERSION,entryPolicyVersion:FLOW_ONLY_POLICY,executionQualityVersion,entrySignalEngine:'sampled_order_flow',pair,timeframe,action:'hold',reasons,directionChecks,flowDiagnostics,adaptiveParameters});
+ const aiEnabled=mode==='demo-futures'&&snapshot?.aiAssist?.enabled===true&&snapshot?.aiAssist?.version===FUTURES_MODEL_ASSIST_VERSION;
+ const hold=reasons=>({version:DEMO_RULE_VERSION,entryPolicyVersion:FLOW_ONLY_POLICY,executionQualityVersion,entrySignalEngine:'sampled_order_flow',pair,timeframe,action:'hold',reasons,directionChecks,flowDiagnostics,adaptiveParameters,...(aiEnabled?{aiAssist:{version:FUTURES_MODEL_ASSIST_VERSION,enabled:true,usedForEntryDecision:true}}:{})});
  if(!['demo','demo-futures'].includes(mode)||timeframe!=='5m')return hold(['FLOW_MODE_OR_TIMEFRAME']);
  let signalBoundary=snapshot.candleBoundary,adaptiveEnabled=false;
  try{const timing=decisionTiming(snapshot);if(timing){adaptiveEnabled=true;signalBoundary=timing.boundary;if(now<timing.boundary||now>=timing.deadline)return hold(['FLOW_DECISION_EXPIRED']);}}
@@ -318,6 +350,8 @@ export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}=
   const flow=assessOrderFlow(market.orderFlow,{mode,pair,long,now});
   const check={action,eligible:false,reasons:[],flowDiagnostics:flow};directionChecks.push(check);
   if(!flow.eligible){check.reasons.push(flow.reason);continue;}
+  const aiAssist=aiEnabled?futuresModelAssist({snapshot,pair,modelEvidence,long}):null;
+  if(aiAssist){check.aiAssist=aiAssist;if(!aiAssist.eligible){check.reasons.push(aiAssist.reason);continue;}}
   flowDiagnostics=flow;
   const continuation=mode==='demo'?assessSpotFlowContinuation(market.orderFlow,quote??market):assessFuturesFlowContinuation(market.orderFlow,quote??market,{long});
   if(continuation){check.executionContinuation=continuation;if(!continuation.eligible)return hold([continuation.reason]);}
@@ -348,13 +382,14 @@ export function orderFlowRuleDecision({snapshot,pair,cost,quote,now=Date.now()}=
    check.eligible=true;
    return {version:DEMO_RULE_VERSION,entryPolicyVersion:FLOW_ONLY_POLICY,executionQualityVersion,entrySignalEngine:'sampled_order_flow',entryRoute:'order-flow',pair,action,timeframe,
     ...(mode==='demo'?{flowStrength:{version:'depth-change-rank-v1',delta:new Decimal(flow.bookImbalances[2]).minus(flow.bookImbalances[0]).toFixed()},flowExit:{...SPOT_FLOW_EXIT_POLICY}}:{}),
+    ...(aiAssist?{aiAssist}:{ }),
     signalAt:signalBoundary,atrTimeframe:'15m',atr15,targetAtr,targetFraction,stopFraction,
     maxHoldingBars:DEMO_PARAMETERS.maxHoldingBars,maxHoldingSeconds:DEMO_PARAMETERS.maxHoldingSeconds,
     requiredPriceSpaceBps:required.toFixed(),selectionScoreBps:new Decimal(check.netRewardRisk.netRewardFraction).minus(check.netRewardRisk.riskFraction).mul(10000).toFixed(),
     selectionScoreBasis:'planned_net_reward_minus_stressed_risk_not_expected_return',directionChecks,flowDiagnostics,...(adaptiveParameters?{adaptiveParameters}:{}),profitProtection:DEMO_PROFIT_PROTECTION,
     entryConfirmation:{version:'order-flow-atr-v1',entryRoute:'order-flow',orderFlow:market.orderFlow,confirmationAt:snapshot.candleBoundary,quotePrice:price.toFixed(),atr15,targetAtr,targetFraction,
      ...(continuation?{executionContinuation:mode==='demo'?{version:SPOT_FLOW_CONTINUATION_VERSION,originAsk:continuation.originAsk}:{version:FUTURES_FLOW_CONTINUATION_VERSION,long:continuation.long,originPrice:continuation.originPrice,quotePrice:continuation.quotePrice}}:{})},
-    note:'Order flow alone selects entry direction. Model and candle trends do not gate orders. ATR exits and costs describe planned geometry, not expected profit.'};
+    note:aiAssist?'Futures Demo uses pinned Kronos direction agreement as an advisory veto; order flow, costs, ATR geometry, native risk and protection remain authoritative. Forecast direction is not realized PnL.':'Order flow alone selects entry direction. Model and candle trends do not gate orders. ATR exits and costs describe planned geometry, not expected profit.'};
   }catch{return hold(['FLOW_PLAN_INVALID']);}
  }
  flowDiagnostics=directionChecks[0]?.flowDiagnostics??null;

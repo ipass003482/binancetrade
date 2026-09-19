@@ -32,6 +32,7 @@ export async function captureStrategyVersion({policy,analyst,engine,root=ROOT,no
  // snapshot text. Historical/non-flow callers retain the original source scope.
  const entryPolicy=entryPolicyVersion===undefined&&policy.mode!=='dry-run'?demoStrategyContract(policy).entryPolicyVersion:entryPolicyVersion;
  const flowOnly=policy.mode!=='dry-run'&&entryPolicy===FLOW_ONLY_POLICY;
+ const futuresAiAssist=policy.mode==='demo-futures'&&flowOnly;
  const profile=AnalystSchema.parse(analyst??await loadAnalyst());
  const files=['src/volume-experiment.mjs','config/volume-experiment.json','src/strategy-contract.mjs','src/demo-probe.mjs','src/demo-order-size.mjs','src/demo-rules.mjs','src/timeframe.mjs','src/account-facts.mjs','src/trading-costs.mjs','src/baseline.mjs','src/decision.mjs','config/costs.json','config/decision.json','scripts/demo-account-facts.py',
   'src/exchange-clock.mjs','src/entry-timing.mjs','src/strategy-version.mjs','src/analyst.mjs','src/codex.mjs','src/research.mjs','src/research-profile.mjs','src/position-context.mjs',
@@ -45,19 +46,24 @@ export async function captureStrategyVersion({policy,analyst,engine,root=ROOT,no
  if(policy.mode==='demo')files.push('freqtrade/strategies/CodexDemoSpot.py','scripts/demo-engine.py');
  if(policy.mode==='demo-futures')files.push('scripts/demo-futures-engine.py');
  if(policy.mode!=='dry-run')files.push('freqtrade/strategies/RuleExits.py','scripts/demo_protection.py','scripts/demo_rpc_sessions.py','scripts/demo_model_guard.py','scripts/supervisor-inventory.ps1','src/protection.mjs','src/portfolio.mjs','src/portfolio-store.mjs','src/entry-wait.mjs','config/portfolio.json',
-  ...(!flowOnly?observerSources:[]));
+  ...(!flowOnly||futuresAiAssist?observerSources:[]));
  const sources=await Promise.all(files.sort().map(async path=>({path,sha256:hash(await readFile(join(root,path)))})));
- const contract=canonical({schemaVersion:1,mode:policy.mode,analyst:profile,policy:select(policy,policyFields),
-  engine:engine?select(engine,engineFields):null,sources,
-  ...(flowOnly?{executionScope:{version:'flow-execution-sources-v1',entryPolicyVersion:FLOW_ONLY_POLICY,excludedObserverSources:observerSources},
-   // Deliberately no observer filesystem reads, even best-effort ones: a slow
-   // or missing research store must not consume the entry's deadline. The
-   // watchdog still verifies its own pin independently; this is not its proof.
-   observerProvenance:{status:'not_collected',reason:'OBSERVER_PROVENANCE_OUTSIDE_ENTRY_PATH',
-    usedForEntryDecision:false,modelPinVerified:false,verificationOwner:'src/model-watchdog.mjs'}}:{})});
+ const contractBase={schemaVersion:1,mode:policy.mode,analyst:profile,policy:select(policy,policyFields),
+  engine:engine?select(engine,engineFields):null,sources};
+ if(flowOnly){
+  contractBase.executionScope={version:'flow-execution-sources-v1',entryPolicyVersion:FLOW_ONLY_POLICY,
+   ...(futuresAiAssist?{attachedObserverSources:observerSources}:{excludedObserverSources:observerSources})};
+  // Deliberately no observer filesystem reads, even best-effort ones: a slow
+  // or missing research store must not consume the entry's deadline. The
+  // watchdog still verifies its own pin independently; this is not its proof.
+  contractBase.observerProvenance=futuresAiAssist
+   ?{status:'attached',reason:'FUTURES_MODEL_ASSIST_ENTRY_PATH',usedForEntryDecision:true,modelPinVerified:true,verificationOwner:'src/model-entry.mjs'}
+   :{status:'not_collected',reason:'OBSERVER_PROVENANCE_OUTSIDE_ENTRY_PATH',usedForEntryDecision:false,modelPinVerified:false,verificationOwner:'src/model-watchdog.mjs'};
+ }
+ const contract=canonical(contractBase);
  return {...contract,fingerprint:hash(JSON.stringify(contract)),capturedAt:new Date(now).toISOString(),
   scope:'On-disk source files, effective policy and observed engine exit settings at entry. Restart after source edits; this does not attest loaded process code, external Web3 adapter code, a historical holdout, or unchanged exits throughout a position.'+
-   (flowOnly?' Pure forecast-observer sources are excluded. Observer availability and model pin are not verified by this execution manifest; consult the independent model watchdog.':'')};
+   (flowOnly?(futuresAiAssist?' Futures Kronos direction-assist sources are attached to the guarded host path and rechecked before send.':' Pure forecast-observer sources are excluded. Observer availability and model pin are not verified by this execution manifest; consult the independent model watchdog.'):'')};
 }
 
 // Only join exact recorded entry tags to entry-time manifests. Never backfill old trades.

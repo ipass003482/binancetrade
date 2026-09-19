@@ -23,6 +23,10 @@ ENGINE_VERSION = 'demo-rule-exits-v12'
 CANCEL_RECONCILIATION_VERSION = 'terminal-read-v2'
 # Bounded read-only backoff after ONE cancel request; never resend a mutation.
 CANCEL_READ_DELAYS_SECONDS = (0, .25, .5, 1, 2)
+# Windows can briefly deny an atomic replace while a read-only consumer closes
+# the readiness file.  Retry the metadata publication only; this never repeats
+# an exchange mutation and still fails closed when the lock persists.
+PROTECTION_REPLACE_RETRY_DELAYS_SECONDS = (0, .05, .1, .25, .5, 1, 2)
 
 
 def pin_demo_exit_config(config, futures=False):
@@ -84,7 +88,18 @@ class GuardedDemoStops:
                 json.dump(state, handle, allow_nan=False)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, path)
+            replace_error = None
+            for wait_seconds in PROTECTION_REPLACE_RETRY_DELAYS_SECONDS:
+                if wait_seconds:
+                    sleep(wait_seconds)
+                try:
+                    os.replace(temp, path)
+                    replace_error = None
+                    break
+                except PermissionError as error:
+                    replace_error = error
+            if replace_error is not None:
+                raise replace_error
         finally:
             temp.unlink(missing_ok=True)
 

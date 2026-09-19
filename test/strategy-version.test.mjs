@@ -47,23 +47,38 @@ test('attribution requires exact tag, snapshot, intact manifest, and entry-time 
 test('flow execution survives missing, malformed, changed and stopped observer evidence in both Demo modes',async()=>{
  for(const mode of ['demo','demo-futures']){
   const args={policy:{mode},analyst:{version:1,style:'active'}},base=await captureStrategyVersion(args),root=await copySources(base);
-  assert.deepEqual(base.executionScope.excludedObserverSources,observerFiles);
+  const futures=mode==='demo-futures';
+  if(futures) assert.deepEqual(base.executionScope.attachedObserverSources,observerFiles);
+  else assert.deepEqual(base.executionScope.excludedObserverSources,observerFiles);
   assert.equal(base.executionScope.entryPolicyVersion,'order-flow-only-v1');
-  assert.equal(base.observerProvenance.status,'not_collected');
-  assert.equal(base.observerProvenance.modelPinVerified,false);
-  assert.equal(base.observerProvenance.usedForEntryDecision,false);
-  assert.equal(base.observerProvenance.verificationOwner,'src/model-watchdog.mjs');
-  assert.ok(observerFiles.every(path=>!base.sources.some(source=>source.path===path)));
-  // The fixture has every execution source, but none of the observer sources.
-  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  if(futures){
+   assert.equal(base.observerProvenance.status,'attached');
+   assert.equal(base.observerProvenance.modelPinVerified,true);
+   assert.equal(base.observerProvenance.usedForEntryDecision,true);
+   assert.equal(base.observerProvenance.verificationOwner,'src/model-entry.mjs');
+   assert.ok(observerFiles.every(path=>base.sources.some(source=>source.path===path)));
+   // Futures direction-assist sources are source-attested and match the copied manifest.
+   assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  }else{
+   assert.equal(base.observerProvenance.status,'not_collected');
+   assert.equal(base.observerProvenance.modelPinVerified,false);
+   assert.equal(base.observerProvenance.usedForEntryDecision,false);
+   assert.equal(base.observerProvenance.verificationOwner,'src/model-watchdog.mjs');
+   assert.ok(observerFiles.every(path=>!base.sources.some(source=>source.path===path)));
+   // The fixture has every execution source, but none of the observer sources.
+   assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  }
   for(const file of [...observerFiles,'local/model-research/loaded-model.json','local/model-research/STOP']){
    const path=join(root,file);await mkdir(dirname(path),{recursive:true});await writeFile(path,'invalid observer evidence');
   }
-  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  if(futures) assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
   await appendFile(join(root,'config/model-execution.json'),'\nchanged observer pin');
-  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  if(futures) assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
   await unlink(join(root,'config/model-execution.json'));
-  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  if(futures) await assert.rejects(captureStrategyVersion({...args,root}),{code:'ENOENT'});
+  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
  }
 });
 

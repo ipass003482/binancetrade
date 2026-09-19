@@ -23,7 +23,7 @@ import { withPortfolioEntry } from './portfolio-store.mjs';
 import { assertNativeProtection,NATIVE_ENTRY_GUARD_VERSION } from './protection.mjs';
 import {loadVolumeExperiment,assertVolumeAssignment} from './volume-experiment.mjs';
 import {entryPlanDigest,readEntryRejection} from './entry-rejection.mjs';
-export async function execute({proposal,snapshot,policy,client,local,now=()=>Date.now(),getQuote=market,
+export async function execute({proposal,snapshot,policy,client,local,modelEvidence,now=()=>Date.now(),getQuote=market,
  strategyVersion,executionPolicyVersion,entryQualityFn=evaluateEntryQuality,getClock=readExchangeClock,getDecisionConfig=loadDecisionConfig,getVolumeConfig=loadVolumeExperiment,probePermitId,portfolioEntryFn=withPortfolioEntry,protectionCheckFn=assertNativeProtection}) {
  if(executionPolicyVersion!==undefined&&(executionPolicyVersion!==BATCH_EXECUTION_VERSION||!['demo','demo-futures'].includes(policy.mode)||!isEntry(proposal.action)||probePermitId))throw Error('BATCH_EXECUTION_MODE_REJECTED');
  const artifactStem=entryArtifactStem(snapshot.id,proposal.pair,executionPolicyVersion);
@@ -55,7 +55,7 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
    await journalAppend(journal,{id,at,status:'hold',action:'hold',snapshotId:snapshot.id,reason:proposal.reason,volumeExperiment});
    return {status:'hold',id};
   }
-  let entryVersion,rulePlan,nativeGuardInputs,costConfig,decisionConfig,probePermit,portfolioCheckedAt,modelEvidence;
+  let entryVersion,rulePlan,nativeGuardInputs,costConfig,decisionConfig,probePermit,portfolioCheckedAt;
   if(probePermitId)probePermit=await validateProbePermit({local,id:probePermitId,proposal,snapshot,mode:policy.mode,now:now()});
   if(isEntry(proposal.action)){
    verifyEntryTiming({snapshot,pair:proposal.pair,mode:policy.mode,clock:executionQuote.clock,now:now()});
@@ -76,7 +76,7 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
      const rules=probePermit??orderFlowRuleDecision({snapshot,pair:proposal.pair,cost,modelEvidence,quote:executionQuote,now:now()});
      if(!probePermit){
       const checkedAt=new Date(now()).toISOString();
-      await writeJson(join(local,'runs',artifactStem+'.rules-recheck.json'),{schemaVersion:1,at:checkedAt,mode:policy.mode,snapshotId:snapshot.id,pair:proposal.pair,requestedAction:proposal.action,strategyFingerprint:entryVersion.fingerprint,entrySignalEngine:'sampled_order_flow',modelUsedForDecision:false,rules});
+      await writeJson(join(local,'runs',artifactStem+'.rules-recheck.json'),{schemaVersion:1,at:checkedAt,mode:policy.mode,snapshotId:snapshot.id,pair:proposal.pair,requestedAction:proposal.action,strategyFingerprint:entryVersion.fingerprint,entrySignalEngine:rules.aiAssist?'sampled_order_flow+kronos_advisory':'sampled_order_flow',modelUsedForDecision:Boolean(rules.aiAssist),aiAssist:rules.aiAssist??null,rules});
       if(rules.action==='hold'||rules.action!==proposal.action){
        const reason='FLOW_ENTRY_RECHECK_FILTERED',reasons=rules.reasons??['FLOW_DIRECTION_CHANGED'];
        await journalAppend(journal,{id,at:checkedAt,status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,...(executionPolicyVersion?{executionPolicyVersion}:{}),reason,reasons,purpose:'strategy',ruleVersion:DEMO_RULE_VERSION});
@@ -98,9 +98,9 @@ export async function execute({proposal,snapshot,policy,client,local,now=()=>Dat
       ...(rules.adaptiveParameters?{adaptiveParameters:rules.adaptiveParameters}:{}),
       riskCostFraction:Number(riskCostFraction(cost)),maxEntryNotionalUsdt:Number(proposal.stakeUsdt),
       ...(probePermit?{}:{riskPolicy:demoRiskPolicy(policy.mode),profitProtection:{...DEMO_PROFIT_PROTECTION},entryConfirmation:rules.entryConfirmation,
-       volumeExperiment,entryPolicyVersion:rules.entryPolicyVersion,...(rules.executionQualityVersion?{executionQualityVersion:rules.executionQualityVersion,flowStrength:rules.flowStrength,flowExit:rules.flowExit}:{}),strategyVariant:DEMO_RULE_VERSION,entrySignalEngine:'sampled_order_flow',
+       volumeExperiment,entryPolicyVersion:rules.entryPolicyVersion,...(rules.executionQualityVersion?{executionQualityVersion:rules.executionQualityVersion,flowStrength:rules.flowStrength,flowExit:rules.flowExit}:{}),strategyVariant:DEMO_RULE_VERSION,entrySignalEngine:'sampled_order_flow',...(rules.aiAssist?{aiAssist:rules.aiAssist}:{}),
        entryEvidence:{version:'order-flow-evidence-v1',snapshotId:snapshot.id,usedForEntryDecision:true,
-        proofSha256:createHash('sha256').update(JSON.stringify(rules.entryConfirmation.orderFlow)).digest('hex')}})};
+        proofSha256:createHash('sha256').update(JSON.stringify(rules.entryConfirmation.orderFlow)).digest('hex'),...(rules.aiAssist?{aiAssist:rules.aiAssist}: {})}})};
      if(!probePermit)nativeGuardInputs={version:minuteTiming?NATIVE_ENTRY_GUARD_VERSION:'kronos-native-entry-v10',snapshotId:snapshot.id,...cadence,
       mode:policy.mode,pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',
       candleBoundary:snapshot.candleBoundary,entryDeadline:minuteTiming?.deadline??snapshot.candleBoundary+60000,

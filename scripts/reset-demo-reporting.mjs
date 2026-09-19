@@ -114,6 +114,15 @@ const goal = {
   ruleVersion: 'kronos-direction-v12',
   entryPolicyVersion: 'order-flow-only-v1',
   modelFingerprint: null,
+  modelAssist: {
+    version: 'futures-kronos-flow-v1',
+    mode: 'demo-futures',
+    role: 'advisory direction veto',
+    model: 'kronos-small-pretrained-v1',
+    modelFingerprint: (await readJson(join(ROOT, 'config', 'model-execution.json'))).modelFingerprint,
+    usedForEntryDecision: true,
+    note: 'Only futures entries in this goal use the pinned forecast as a direction veto. Spot remains order-flow-only; native flow, cost, risk and protection remain authoritative.'
+  },
   target: { scope: 'combined', count: 100 },
   modes: Object.fromEntries(MODES.map(mode => [mode, {
     excludedTradeIds: modeFacts[mode].excludedTradeIds,
