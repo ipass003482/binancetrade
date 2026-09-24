@@ -173,7 +173,7 @@ function flowFixture({futures=false,pairCount=1}={}){
  return f;
 }
 
-test('Kev order-flow payload has full pool, public book and tape evidence, and no candle or model fields',async()=>{
+test('Kev order-flow payload ranks the full pool by auditable cost and flow fields',async()=>{
  const f=flowFixture({pairCount:10});let request;
  f.config={...f.config,decisionStyle:'aggressive'};
  f.fetchImpl=async(_url,{body})=>{
@@ -185,10 +185,10 @@ test('Kev order-flow payload has full pool, public book and tape evidence, and n
  assert.equal(review.status,'reviewed',review.reason);assert.equal(request.state.marketData,'order-flow');
  assert.ok(Buffer.byteLength(JSON.stringify(request))<32768);
  assert.equal(request.state.decisionStyle,'aggressive');
- assert.match(request.questions.entry.instructions,/Aggressive profile/);
- assert.match(request.state.context,/aggressive entry profile/);
+ assert.match(request.questions.entry.instructions,/不得自行追加門檻/);
+ assert.match(request.state.context,/候選池為空時才選 HOLD/);
  assert.deepEqual(request.state.candidates.map(c=>c.pair),f.policy.pairs);
- assert.equal(request.state.markets.length,10);assert.equal(request.state.markets[0].orderFlow.books.length,3);
+ assert.equal(request.state.markets.length,10);assert.equal(request.state.markets[0].orderFlow.books.length,2);
  assert.equal(request.state.markets[0].orderFlow.books[0].bids.length,5);
  assert.equal(request.state.markets[0].orderFlow.tradeCount,12);
  assert.equal(request.state.markets[0].orderFlow.recentTradeSample.length,8);
@@ -202,6 +202,21 @@ test('Kev order-flow payload has full pool, public book and tape evidence, and n
   version:'kev-net-margin-v1',targetNetMarginBps:'120',quoteDriftReserveBps:'5',
   netMarginAfterQuoteDriftBps:'115',minimumNetMarginBps:'10'});
  assert.deepEqual(review.approvedPairs,[f.policy.pairs[9]]);
+});
+
+test('aggressive shortlist puts lower required cost first and exposes the rank evidence to Kev',async()=>{
+ const f=flowFixture({pairCount:10});let request;
+ f.config={...f.config,decisionStyle:'aggressive',maxCandidates:3};
+ for(const candidate of f.reference.candidates){
+  candidate.requiredPriceSpaceBps=candidate.pair==='ETH/USDT'?'30':candidate.pair==='BNB/USDT'?'40':'50';
+ }
+ f.fetchImpl=async(_url,{body})=>{request=JSON.parse(body);return new Response(JSON.stringify(kevReply(request,{now:f.now(),choice:'q0'})));};
+ const review=await reviewKevEntries(f);
+ assert.equal(review.status,'reviewed',review.reason);
+ assert.deepEqual(request.state.candidates.map(c=>c.pair),['ETH/USDT','BNB/USDT','BTC/USDT']);
+ assert.deepEqual(request.state.candidates.map(c=>c.flowShortlist.requiredPriceSpaceBps),['30','40','50']);
+ assert.ok(request.state.candidates.every(c=>c.flowShortlist.version==='kev-flow-shortlist-v2'));
+ assert.deepEqual(review.approvedPairs,['ETH/USDT']);
 });
 
 test('full ten-pair fee-aware request keeps every padded exchange quote and fits the bounded payload',async()=>{
@@ -225,7 +240,7 @@ test('full ten-pair fee-aware request keeps every padded exchange quote and fits
  const r=await reviewKevEntries(f);assert.equal(r.status,'reviewed',r.reason);
  assert.equal(request.state.candidates.length,10);assert.equal(request.state.markets.length,10);
  for(const market of request.state.markets){
-  assert.equal(market.orderFlow.books.length,3);
+  assert.equal(market.orderFlow.books.length,2);
   for(const book of market.orderFlow.books){
    assert.equal(book.bids.length,5);assert.equal(book.asks.length,5);
    assert.equal(book.bids[0][0],'100');assert.equal(book.bids[0][1],'123456.1234');
@@ -243,7 +258,7 @@ test('balanced Kev can HOLD without a cost-adjusted case and receives explicit b
  };
  const r=await reviewKevEntries(f);
  assert.equal(r.selection.choice,'hold');assert.deepEqual(r.approvedPairs,[]);
- assert.match(request.questions.entry.instructions,/cost-adjusted case is missing, weak, stale or contradictory/);
+ assert.match(request.questions.entry.instructions,/不得自行追加門檻/);
  assert.match(request.state.context,/already include the spread; do not deduct it again/);
  assert.ok(Number(request.state.candidates[0].costEconomics.breakEvenExitQuotePrice)>100.01);
  assert.equal(request.state.candidates[0].costEconomics.forecast,false);

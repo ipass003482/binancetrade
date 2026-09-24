@@ -11,6 +11,7 @@ import {isEntry} from './mode.mjs';
 import {executableCostEconomics} from './trading-costs.mjs';
 
 export const KEV_ENTRY_VERSION='kev-codex-entry-v1';
+export const KEV_FLOW_SHORTLIST_VERSION='kev-flow-shortlist-v2';
 const Config=z.object({version:z.literal(KEV_ENTRY_VERSION),baseUrl:z.literal('http://127.0.0.1:8009'),
  model:z.literal('kev-codex'),expectedModel:z.string().min(1).max(100),timeoutMs:z.number().int().min(2000).max(20000),
  executionReserveMs:z.number().int().min(10000).max(20000),approvalTtlMs:z.literal(60000),
@@ -64,26 +65,47 @@ function flowEvidence(proof){
    windowStart:proof.startTime,windowEnd:proof.endTime,tradeCount:trades.length,
    metrics:{takerBuyNotional:buy.toFixed(),takerSellNotional:sell.toFixed(),takerBuyShare:total.gt(0)?buy.div(total).toFixed():null,
     bookImbalances,midPriceChangeBps:mids.length?mids.at(-1).div(mids[0]).minus(1).mul(10000).toFixed():null},
-   books,recentTradeSample:trades.slice(-8).map(t=>({a:t.a,p:compactDecimal(t.p),q:compactDecimal(t.q),T:t.T,m:t.m})),
+   books:books.slice(-2),recentTradeSample:trades.slice(-8).map(t=>({a:t.a,p:compactDecimal(t.p),q:compactDecimal(t.q),T:t.T,m:t.m})),
    rawTradeSampleLimit:8,rawTradeSampleIsComplete:trades.length<=8};
  }catch{return null;}
 }
 
-// Aggressive mode keeps the model call small enough to finish inside the
-// one-minute decision window.  This score only chooses which public
-// candidates are shown to Kev; it never approves an order or changes the
-// native direction/cost/quote guards.
-function flowShortlistScore(market,action){
+// Rank only candidates that already passed native entry guards. Prefer lower
+// execution friction, then stronger persistent aligned flow. This never
+// authorizes an order or changes native thresholds.
+export function kevFlowShortlistEvidence(market,action,candidate={}){
  try{
   const metrics=flowEvidence(market?.orderFlow)?.metrics;
-  if(!metrics)return -Infinity;
+  if(!metrics)return null;
   const buy=new Decimal(metrics.takerBuyNotional),sell=new Decimal(metrics.takerSellNotional),total=buy.plus(sell);
-  if(total.lte(0))return -Infinity;
+  if(total.lte(0))return null;
   const long=action!=='open-short',share=(long?buy:sell).div(total),depth=(metrics.bookImbalances??[])
-   .map(value=>new Decimal(value)).filter(value=>value.isFinite()).reduce((sum,value)=>sum.plus(long?value:value.neg()),new Decimal(0));
+   .map(value=>new Decimal(value)).filter(value=>value.isFinite()).map(value=>long?value:value.neg());
+  if(depth.length<2)return null;
+  const persistentBook=Decimal.min(...depth.slice(-2));
   const move=new Decimal(metrics.midPriceChangeBps??0),directionalMove=long?move:move.neg();
-  return share.minus('.5').mul(100).plus(depth.mul(20)).plus(directionalMove).toNumber();
- }catch{return -Infinity;}
+  const required=candidate.requiredPriceSpaceBps===undefined?null:new Decimal(candidate.requiredPriceSpaceBps);
+  const margin=candidate.netMargin?.netMarginAfterQuoteDriftBps===undefined?null:new Decimal(candidate.netMargin.netMarginAfterQuoteDriftBps);
+  if(!share.isFinite()||!persistentBook.isFinite()||!directionalMove.isFinite()||
+   (required&&!required.isFinite())||(margin&&!margin.isFinite()))return null;
+  return {version:KEV_FLOW_SHORTLIST_VERSION,...(required?{requiredPriceSpaceBps:required.toFixed()}:{}),
+   ...(margin?{netMarginAfterQuoteDriftBps:margin.toFixed()}:{}),alignedTakerShare:share.toFixed(),
+   persistentBookImbalance:persistentBook.toFixed(),favorableMidMoveBps:directionalMove.toFixed()};
+ }catch{return null;}
+}
+function compareShortlistValue(a,b,field,direction='desc'){
+ const left=a.__flowRankEvidence?.[field],right=b.__flowRankEvidence?.[field];
+ if(left===undefined&&right===undefined)return 0;
+ if(left===undefined)return 1;if(right===undefined)return -1;
+ const compared=new Decimal(left).comparedTo(new Decimal(right));
+ return direction==='asc'?compared:-compared;
+}
+function compareShortlist(a,b){
+ return compareShortlistValue(a,b,'requiredPriceSpaceBps','asc')||
+  compareShortlistValue(a,b,'netMarginAfterQuoteDriftBps')||
+  compareShortlistValue(a,b,'alignedTakerShare')||
+  compareShortlistValue(a,b,'persistentBookImbalance')||
+  compareShortlistValue(a,b,'favorableMidMoveBps')||a.__flowRankIndex-b.__flowRankIndex;
 }
 
 function candidatesFor(reference,snapshot,account,config){
@@ -92,13 +114,13 @@ function candidatesFor(reference,snapshot,account,config){
   !(account?.trades??[]).some(t=>t.pair===c.pair));
 if(isKevFlow(snapshot)){
   // Balanced mode keeps the full pool, including opposite directions for the
-  // same contract. Aggressive mode uses only a small public-flow shortlist so
-  // the Codex call can complete before the minute deadline; Kev still chooses
-  // the final pair/direction or HOLD from that shortlist.
+  // same contract. Aggressive mode orders every surviving candidate by
+  // auditable cost and aligned-flow fields before bounding the model request.
   let pool=available;
-  if(config.decisionStyle==='aggressive'&&available.length>config.maxCandidates){
-   pool=available.map((candidate,index)=>({...candidate,__flowRankScore:flowShortlistScore(snapshot.markets.find(m=>m.pair===candidate.pair),candidate.action),__flowRankIndex:index}))
-    .sort((a,b)=>b.__flowRankScore-a.__flowRankScore||a.__flowRankIndex-b.__flowRankIndex).slice(0,config.maxCandidates);
+  if(config.decisionStyle==='aggressive'){
+   pool=available.map((candidate,index)=>({...candidate,
+    __flowRankEvidence:kevFlowShortlistEvidence(snapshot.markets.find(m=>m.pair===candidate.pair),candidate.action,candidate),
+    __flowRankIndex:index})).sort(compareShortlist).slice(0,config.maxCandidates);
   }else if(available.length>config.maxCandidates)throw Error('KEV_CANDIDATE_POOL_TOO_LARGE');
   const identities=new Set();
   return pool.map((c,i)=>{
@@ -119,7 +141,7 @@ if(isKevFlow(snapshot)){
     minimumNetMarginBps:c.netMargin.minimumNetMarginBps
    }:null;
    return {id:'q'+i,pair:c.pair,action:c.action,stopFraction:c.stopFraction,targetFraction:c.targetFraction,
-    maxHoldingSeconds:c.maxHoldingSeconds,...(Number.isFinite(c.__flowRankScore)?{flowShortlist:{version:'kev-flow-shortlist-v1',rankScoreBps:String(c.__flowRankScore)}}:{}),costEconomics,netMargin};
+    maxHoldingSeconds:c.maxHoldingSeconds,...(c.__flowRankEvidence?{flowShortlist:c.__flowRankEvidence}:{}),costEconomics,netMargin};
  });
 }
  available.sort((a,b)=>Number(b.pair===reference.selected?.pair)-Number(a.pair===reference.selected?.pair)||
@@ -148,18 +170,20 @@ const KEV_MICROSTRUCTURE_CONTEXT=`${KEV_MICROSTRUCTURE_ROLE}
 2. 系統已預先執行硬性風控檢查。candidateDiagnostics 僅供說明被移除的原因，絕不能繞過任何硬性限制。
 3. 不得重算或修改系統提供的任何數值，亦不得自行捏造機率、預測或外部未提供的資訊。
 
-【雙重確認與淨邊際過濾】
+【主機已驗證候選的決策方式】
 
-1. 主動成交（Trades）的方向與掛單簿（Order Book）的方向必須同時明確且一致，才是 live 候選。掛單簿方向以最新兩個深度樣本一致為準，第一個樣本允許是單一雜訊；只有一側支持、最新兩個樣本方向失配、或深度方向混合的訊號屬於 shadowSignals，只能觀察與記錄，嚴禁選取送單。
-2. costEconomics 已扣除手續費、買賣價差、雙邊滑價與合約資金費預留；並且已保留報價漂移預算。只有 targetNetMarginBps 扣除 quoteDriftReserveBps 後仍不低於 minimumNetMarginBps 的候選，才允許選取。
-3. 只在通過雙重方向確認與淨邊際硬性檢查的 q0、q1、q2 中比較。若沒有 live 候選，必須選 hold；不得為了增加頻率而把 shadowSignals 當成可下單候選。
+1. q0、q1、q2 都已通過主機硬性檢查：逐筆主動成交方向與最新兩個掛單簿樣本一致、連續兩個 60 秒窗口確認、波動與價差限制、淨成本邊際、部位大小及風控。candidateDiagnostics 是被移除候選的原因；shadowSignals 僅供觀察，絕不能選取。
+2. 主機已按可核對欄位排序：較低 requiredPriceSpaceBps、較高扣除報價漂移後淨邊際、較強同向主動成交、較穩定的最近兩個掛單簿樣本，再看同向價格變化。這是相對排序，不是勝率、預測或獲利保證；q0 是排序第一的候選。
+3. 只在提供的 live 候選中選擇。至少有一個資料完整且方向一致的 q 候選時，除非該候選明確顯示缺漏或方向矛盾，不得再套用「不夠強」「不完美」或外加門檻而選 HOLD。候選池為空時才選 HOLD。
 
 這是 aggressive entry profile 的高頻決策，但高頻不代表忽略成本。系統已執行報價、容量、風控、時限與保護檢查；candidateDiagnostics 與 shadowSignals 絕不能覆寫硬性限制。進場 ask/bid 與退出 bid/ask already include the spread; do not deduct it again。不得改變系統提供的價格、數量、槓桿、方向或保護參數。
 
 【60 秒決策窗口與嚴格輸出格式】
 
 請在本次 60 秒決策窗口內完成評估。只在 choice 欄位輸出 q0、q1、q2 或 hold（HOLD）；不得輸出任何解釋、前言、後記、推理過程或其他字元。`;
-const KEV_MICROSTRUCTURE_INSTRUCTIONS=`Aggressive profile：在 60 秒窗口內比較所有系統提供的 live q 候選，核對 Trades 與最新兩個 Order Book 深度樣本的方向是否一致，以及 costEconomics 的 targetNetMarginBps、quoteDriftReserveBps、minimumNetMarginBps。shadowSignals 僅供記錄，永遠不得選取。只有雙重方向一致且淨邊際扣除報價漂移後仍達最低門檻的候選才可選；若沒有這類候選必須選 hold。若有多個 live 候選，選成本後淨邊際與方向性證據相對最強者。cost-adjusted case is missing, weak, stale or contradictory 時必須選 hold，不得以積極設定繞過成本硬性檢查。不要發明或修改 pair、方向、價格、數量、槓桿、保護參數、機率或預測。系統會執行所有原生硬性檢查並使用所選候選的原始參數。最終 choice 只能是 q0、q1、q2 或 hold（HOLD），不得附帶任何其他字元。`;
+const KEV_MICROSTRUCTURE_INSTRUCTIONS=`主機已完成硬性風控，只把雙向訊號、連續兩窗口、報價與成本檢查都通過的 live 候選列為 q0、q1、q2。candidateDiagnostics 和 shadowSignals 不得選取。q0 是按較低必要成本、較高成本後邊際、同向主動成交、最近兩個掛單簿支持及同向價格變化排序第一；這些是相對資料，不是機率或預測。
+
+只比較 live 候選。至少有一個資料完整、方向一致的候選時，選相對證據最佳者；不得自行追加門檻，也不得只因訊號非完美或無法保證獲利就 HOLD。若沒有候選或候選明確呈現資料缺漏／方向矛盾，才選 hold。不得更改 pair、方向、價格、數量、槓桿、保護參數，不得捏造機率或預測，也不得覆寫主機風控。choice 僅能是 q0、q1、q2 或 hold（HOLD）。`;
 
 function requestFor(snapshot,candidates,config,reference){
  const aggressive=config.decisionStyle==='aggressive';
