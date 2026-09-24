@@ -71,9 +71,10 @@ async function loadFacts(){
 async function prepare(){
  assert.equal(await exists(maintenancePath),false,'RESET_ALREADY_PREPARED');
  const at=nowIso(),marker=`kev reporting reset ${at}`;
- for(const path of [supervisorStop,...MODES.map(modeStop)]){
-  assert.equal(await exists(path),false,`STOP_ALREADY_EXISTS:${path}`);
-  await writeFile(path,marker,{flag:'wx'});
+ const stopPaths=[supervisorStop,...MODES.map(modeStop)],preexistingStops={};
+ for(const path of stopPaths){
+  if(await exists(path))preexistingStops[path]=await readFile(path,'utf8');
+  else await writeFile(path,marker,{flag:'wx'});
  }
  try{
   await waitForDrain();
@@ -81,7 +82,8 @@ async function prepare(){
   const previousGoal=await readJson(resolve(root,active.goalPath));
   const executionSession=await readJson(join(root,'local','demo-session.json'));
   const facts=await loadFacts();
-  const reset={schemaVersion:1,at,marker,scope:'reporting-only; no orders, history or execution-session writes',
+  const reset={schemaVersion:1,at,marker,preexistingStops,
+   scope:'reporting-only; no orders, history or execution-session writes',
    previousActive:active,previousGoal,executionSession,modeFacts:facts.modeFacts,
    oldHistory: Object.fromEntries(MODES.map(mode=>[mode,facts.histories[mode].trades.map(compact)])),
    rawLogsPreserved:true,entriesPaused:true};
@@ -101,8 +103,12 @@ async function prepare(){
 async function commit(){
  const maintenance=await readJson(maintenancePath);
  assert.equal(maintenance.entriesPaused,true);
- assert.equal(await readFile(supervisorStop,'utf8'),maintenance.marker);
- for(const mode of MODES)assert.equal(await readFile(modeStop(mode),'utf8'),maintenance.marker);
+ const stopPaths=[supervisorStop,...MODES.map(modeStop)];
+ for(const path of stopPaths){
+  const expected=Object.hasOwn(maintenance.preexistingStops??{},path)
+   ?maintenance.preexistingStops[path]:maintenance.marker;
+  assert.equal(await readFile(path,'utf8'),expected,`RESET_STOP_MARKER_CHANGED:${path}`);
+ }
  await waitForDrain();
  const kevConfig=await readJson(join(root,'config','kev-entry.json'));
  const kevResponse=await fetch(new URL('/healthz',kevConfig.baseUrl),{signal:AbortSignal.timeout(5000)});
@@ -149,10 +155,11 @@ async function commit(){
   realizedUsdt:'0',floatingUsdt:'0',positionsPreserved:true,historyPreserved:true,executionSessionPreserved:true,
   ordersSubmittedByReset:0,previousGoalId:maintenance.previousActive.goalId,previousGoalPreserved:true,servicesRestarted:false};
  await writeJson(join(goalDir,'reset-verification.json'),verification);
- for(const path of [supervisorStop,...MODES.map(modeStop)]){
+ for(const path of stopPaths){
+  if(Object.hasOwn(maintenance.preexistingStops??{},path))continue;
   assert.equal(await readFile(path,'utf8'),maintenance.marker);
+  await import('node:fs/promises').then(fs=>fs.unlink(path));
  }
- for(const path of [supervisorStop,...MODES.map(modeStop)])await import('node:fs/promises').then(fs=>fs.unlink(path));
  await writeJson(join(dir,'commit.json'),{committedAt:nowIso(),goal,verification,active:{sessionId,goalId,goalPath},
   historyPreserved:true,executionSessionPreserved:true,ordersSubmittedByReset:0});
   console.log(JSON.stringify({reset:true,goal:{id:goalId,path:goalPath,target:goal.target,startedAt:at,deadline},
