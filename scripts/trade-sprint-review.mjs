@@ -14,11 +14,16 @@ const validTime=v=>typeof v==='string'&&/T.*(?:Z|[+-]\d\d:\d\d)$/.test(v)&&Numbe
 export function buildSprintReview({goal,histories,journals,observedAt,amendment=null}){
  if(goal?.schemaVersion!==2||!validTime(goal.startedAt)||!validTime(goal.deadline)||
   Date.parse(goal.deadline)<=Date.parse(goal.startedAt)||!['each','combined'].includes(goal.target?.scope)||
-  !Number.isSafeInteger(goal.target.count)||goal.target.count<1||!['forecast-net-edge-v1','trend-pullback-flow-v1','order-flow-only-v1'].includes(goal.entryPolicyVersion))throw Error('SPRINT_GOAL_INVALID');
- if(amendment&&(goal.entryPolicyVersion==='order-flow-only-v1'||amendment.schemaVersion!==1||amendment.goalId!==goal.id||amendment.entryPolicyVersion!=='order-flow-only-v1'||
+  !Number.isSafeInteger(goal.target.count)||goal.target.count<1||!['forecast-net-edge-v1','trend-pullback-flow-v1','order-flow-only-v1','kev-order-flow-v1'].includes(goal.entryPolicyVersion))throw Error('SPRINT_GOAL_INVALID');
+ const kevAmendment=amendment?.entryPolicyVersion==='kev-order-flow-v1';
+ if(amendment&&(goal.entryPolicyVersion===amendment.entryPolicyVersion||amendment.schemaVersion!==1||amendment.goalId!==goal.id||
+  !['order-flow-only-v1','kev-order-flow-v1'].includes(amendment.entryPolicyVersion)||
+  (kevAmendment&&amendment.ruleVersion!=='kev-order-flow-v1')||
   amendment.goalSha256!==hash(Buffer.from(JSON.stringify(goal)))||!validTime(amendment.effectiveAt)||
   Date.parse(amendment.effectiveAt)<Date.parse(goal.startedAt)||Date.parse(amendment.effectiveAt)>=Date.parse(goal.deadline)))throw Error('SPRINT_AMENDMENT_INVALID');
- const checked=buildTradeGoalReview({goal:{...goal,schemaVersion:1,deadline:null,targetPerMode:goal.target.count,allowOrderFlowOnly:!!amendment},histories,journals,observedAt});
+ const checked=buildTradeGoalReview({goal:{...goal,schemaVersion:1,deadline:null,targetPerMode:goal.target.count,
+  allowOrderFlowOnly:amendment?.entryPolicyVersion==='order-flow-only-v1',
+  ...(kevAmendment?{kevOrderFlowAmendment:{ruleVersion:amendment.ruleVersion,effectiveAt:amendment.effectiveAt}}:{})},histories,journals,observedAt});
  const deadline=Date.parse(goal.deadline),modes={};
  for(const mode of MODES){
   const original=checked.modes[mode],accepted=[],excluded=[];
@@ -85,7 +90,12 @@ export async function main(argv=process.argv.slice(2)){
    journals[mode]=await journalRead(join(ROOT,'local',mode,'orders.jsonl'));
   }catch{histories[mode]={source:'freqtrade-demo',historyComplete:false,observedAt:new Date().toISOString(),error:'HISTORY_UNAVAILABLE'};}
  }
- let amendment=null;try{amendment=await readJson(join(directory,'order-flow-only-amendment.json'));}catch(e){if(e.code!=='ENOENT')throw e;}
+ let amendment=null;
+ for(const name of ['order-flow-only-amendment.json','kev-order-flow-amendment.json']){
+  let found;try{found=await readJson(join(directory,name));}catch(e){if(e.code!=='ENOENT')throw e;continue;}
+  if(amendment)throw Error('SPRINT_MULTIPLE_AMENDMENTS_UNSUPPORTED');
+  amendment=found;
+ }
  const input={goal,amendment,histories,journals,observedAt:new Date().toISOString()},report=buildSprintReview(input);
  const archive=join(directory,'reviews',input.observedAt.replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,8));await mkdir(archive,{recursive:true});
  const bytes=Buffer.from(JSON.stringify(input,null,2)+'\n');await writeFile(join(archive,'input.json'),bytes,{flag:'wx'});

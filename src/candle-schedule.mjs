@@ -7,13 +7,18 @@ export const CLOSE_BUFFER_MS=5000;
 // Demo futures may revise the just-closed volume/close for several seconds.
 // The measured 5s->10s revisions motivate a 15s collection start, while all
 // model/native first-minute expiry checks remain unchanged.
-export function closeBufferMs(mode){return mode==='demo-futures'?15000:CLOSE_BUFFER_MS;}
+// The Kev adapter is single-flight. Stagger its two Demo markets while
+// preserving the existing minute expiry; this adds no retry or extra lifetime.
+export function closeBufferMs(mode,{entryPolicyVersion}={}){
+ return mode==='demo-futures'?(entryPolicyVersion==='kev-order-flow-v1'?30000:15000):CLOSE_BUFFER_MS;
+}
 export const START_GRACE_MS=60000;
 export function cycleTimingLimits(mode,{health={},continuous={},timeframe}={}){
  const minute=['demo','demo-futures'].includes(mode)&&(continuous.decisionCadenceVersion===FLOW_DECISION_CADENCE_VERSION||
   health.timing?.decisionCadenceVersion===FLOW_DECISION_CADENCE_VERSION||health.stage==='waiting_decision');
  const intervalMs=minute?FLOW_DECISION_INTERVAL_MS:timeframeSpec(timeframe??(mode==='dry-run'?'15m':'5m')).ms;
- return {intervalMs,cycleMaxAgeMs:intervalMs*2+closeBufferMs(mode),startupGraceMs:intervalMs+closeBufferMs(mode)+60000};
+ const delay=closeBufferMs(mode,{entryPolicyVersion:continuous.entryPolicyVersion??health.timing?.entryPolicyVersion});
+ return {intervalMs,cycleMaxAgeMs:intervalMs*2+delay,startupGraceMs:intervalMs+delay+60000};
 }
 // Called under the per-mode watch lock. Persist the claim BEFORE research:
 // a failed/crashed cycle must not be retried for the same scheduled candle.
@@ -54,21 +59,30 @@ export async function lastDecisionClaim(local){
   s.boundary%FLOW_DECISION_INTERVAL_MS!==0)throw Error('INVALID_DECISION_SCHEDULE');
  return s.boundary;
 }
-export function nextDecisionBoundary(now,last=0,mode){
+export function nextDecisionBoundary(now,last=0,mode,options={}){
  if(!['demo','demo-futures'].includes(mode)||!Number.isFinite(now)||!Number.isSafeInteger(last)||last<0||last%FLOW_DECISION_INTERVAL_MS!==0)
   throw Error('INVALID_DECISION_SCHEDULE_TIME');
- return Math.max((Math.floor((now-closeBufferMs(mode))/FLOW_DECISION_INTERVAL_MS)+1)*FLOW_DECISION_INTERVAL_MS,last+FLOW_DECISION_INTERVAL_MS);
+ return Math.max((Math.floor((now-closeBufferMs(mode,options))/FLOW_DECISION_INTERVAL_MS)+1)*FLOW_DECISION_INTERVAL_MS,last+FLOW_DECISION_INTERVAL_MS);
 }
-export async function claimDecisionBoundary(local,boundary,now=Date.now(),mode){
+export async function claimDecisionBoundary(local,boundary,now=Date.now(),mode,options={}){
  if(!['demo','demo-futures'].includes(mode)||!Number.isSafeInteger(boundary)||boundary<=0||boundary%FLOW_DECISION_INTERVAL_MS!==0||
-  !Number.isFinite(now)||now<boundary+closeBufferMs(mode)||now>=boundary+FLOW_DECISION_INTERVAL_MS||boundary<=await lastDecisionClaim(local))return false;
+  !Number.isFinite(now)||now<boundary+closeBufferMs(mode,options)||now>=boundary+FLOW_DECISION_INTERVAL_MS||boundary<=await lastDecisionClaim(local))return false;
  await writeJson(join(local,'decision-schedule.json'),{version:1,decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,
-  decisionIntervalMs:FLOW_DECISION_INTERVAL_MS,boundary,claimedAt:new Date(now).toISOString()});return true;
+  decisionIntervalMs:FLOW_DECISION_INTERVAL_MS,boundary,claimedAt:new Date(now).toISOString(),
+  ...(options.entryPolicyVersion==='kev-order-flow-v1'?{entryPolicyVersion:options.entryPolicyVersion,collectionDelayMs:closeBufferMs(mode,options)}:{})});return true;
 }
 export function verifyScheduledDecision(snapshot,boundary,now=Date.now()){
  const decision=decisionTiming(snapshot);
  if(!decision||decision.boundary!==boundary||clockDecisionBoundary(snapshot.clock,snapshot.mode,now)!==boundary)
   throw Error('SCHEDULED_DECISION_NOT_READY');
+ if(snapshot.entryPolicyVersion==='kev-order-flow-v1'&&snapshot.timeframe==='order-flow'){
+  if(clockDecisionBoundary(snapshot.clock,snapshot.mode,Date.parse(snapshot.createdAt))!==boundary||
+   !Array.isArray(snapshot.markets)||!snapshot.markets.length||
+   new Set(snapshot.markets.map(m=>m.pair)).size!==snapshot.markets.length||
+   snapshot.markets.some(m=>m.mode!==snapshot.mode||m.timeframe!=='order-flow'||
+    Object.hasOwn(m,'candles')||Object.hasOwn(m,'candleBoundary')))throw Error('SCHEDULED_DECISION_NOT_READY');
+  return;
+ }
  // The most recent complete 5m candle may legitimately serve five separate
  // minute decisions; the live flow/quote and decision identities may not.
  verifyScheduledCandles(snapshot,snapshot.candleBoundary,now);

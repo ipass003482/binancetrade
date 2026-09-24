@@ -193,3 +193,76 @@ test('corrupt marker invalidates a previous complete report without guessing a r
  assert.equal(result.historyComplete, false); assert.equal(result.validation.evidenceComplete, false);
  assert.equal(await readFile(join(local, 'forward-trial.json'), 'utf8'), '{broken');
 });
+
+function kevEntry(n,at,extra={}){
+ const snapshotId='00000000-0000-4000-8000-'+String(n).padStart(12,'0');
+ return {id:id(n),tag:tag(n),at:new Date(at).toISOString(),status:'pending',purpose:'strategy',
+  ruleVersion:'kev-order-flow-v1',entryPolicyVersion:'kev-order-flow-v1',entrySignalEngine:'kev_order_flow',
+  pair:'ETH/USDT',action:'buy',snapshotId,
+  entryEvidence:{version:'kev-order-flow-evidence-v1',snapshotId,usedForEntryDecision:true,proofSha256:'a'.repeat(64),
+   kevReview:{version:'kev-codex-entry-v1',decisionMode:'autonomous',provider:'codex-cli',model:'gpt-6-astra',
+    requestId:'synthetic-'+n,snapshotId,snapshotSha256:'b'.repeat(64),configSha256:'c'.repeat(64),proofSha256:'d'.repeat(64),
+    completedAt:new Date(at-1000).toISOString(),expiresAt:new Date(at+59000).toISOString(),probabilitiesCalibrated:false,
+    decision:{pair:'ETH/USDT',action:'buy',approved:true,choice:'select'}}},...extra};
+}
+
+test('Kev attribution requires its exact reviewed pending intent and preserves the existing trial identity',async()=>{
+ const local=await directory(),old=trade(1,Date.now()-1000),first=await beginForwardTrial(local,'demo',[old]);
+ const at=Date.parse(first.startedAt),entry=kevEntry(2,at);
+ await recordForwardEntry(local,entry);await recordForwardEntry(local,entry);
+ const saved=await readJson(join(local,'forward-trial.json'));
+ assert.equal(saved.version,first.version);assert.equal(saved.startedAt,first.startedAt);
+ assert.deepEqual(saved.excludedTradeIds,first.excludedTradeIds);assert.deepEqual(saved.strategyTags,[tag(2)]);
+ assert.deepEqual(saved.policyTags,{'kev-order-flow-v1':[tag(2)]});
+ await appendEntry(local,trade(2,at,{profit_abs:'.4'}),entry);
+ const report=await refreshForwardReport(local,{history:async()=>[old,trade(2,at,{profit_abs:'.4'})]});
+ assert.equal(report.strategy.closedTrades,1);assert.equal(report.strategy.netRealizedUsdt,'0.4');
+ assert.equal(report.policyCohorts.mixedPolicies,false);
+ assert.equal(report.policyCohorts.cohorts[0].entryPolicyVersion,'kev-order-flow-v1');
+ assert.equal(report.policyCohorts.cohorts[0].strategy.closedTrades,1);
+ assert.equal(report.policyCohorts.cohorts[0].validation.preliminarySampleAvailable,false);
+});
+
+test('missing, expired or mismatched Kev receipts stay unattributed and cannot fall through to legacy rules',async()=>{
+ const local=await directory(),trial=await beginForwardTrial(local,'demo',[]),at=Date.parse(trial.startedAt);
+ const changes=[e=>delete e.entryEvidence.kevReview,e=>e.entryEvidence.snapshotId='other',
+  e=>e.entryEvidence.proofSha256='bad',e=>e.entryEvidence.kevReview.proofSha256='bad',
+  e=>e.entryEvidence.kevReview.snapshotSha256='bad',e=>e.entryEvidence.kevReview.configSha256='bad',
+  e=>e.entryEvidence.kevReview.snapshotId='other',e=>e.entryEvidence.kevReview.decision.approved=false,
+  e=>e.entryEvidence.kevReview.decision.pair='BTC/USDT',e=>e.entryEvidence.kevReview.decision.action='open-short',
+  e=>e.entryEvidence.kevReview.expiresAt=e.at,e=>e.purpose=undefined,e=>e.status='submitted',
+  e=>e.entryPolicyVersion='order-flow-only-v1',e=>e.entrySignalEngine='sampled_order_flow',
+  e=>e.ruleVersion=FORWARD_TRIAL_VERSION];
+ const trades=[];
+ for(const [i,change] of changes.entries()){
+  const entry=kevEntry(i+1,at);change(entry);
+  await assert.rejects(recordForwardEntry(local,entry),/NOT_ATTRIBUTABLE/);
+  const t=trade(i+1,at);trades.push(t);await appendEntry(local,t,entry);
+ }
+ const report=await refreshForwardReport(local,{history:async()=>trades});
+ assert.equal(report.strategy.closedTrades,0);assert.equal(report.policyCohorts.cohorts.length,0);
+ assert.equal(report.ignored.filter(row=>row.reason==='unattributed_entry_tag').length,changes.length);
+ assert.equal(report.validation.evidenceComplete,false);
+ assert.deepEqual((await readJson(join(local,'forward-trial.json'))).strategyTags,[]);
+});
+
+test('mixed Kronos and Kev totals never pool to qualify a preliminary sample and retain distinct policy cohorts',async()=>{
+ const local=await directory(),trial=await beginForwardTrial(local,'demo',[]),at=Date.parse(trial.startedAt),trades=[];
+ for(let n=1;n<=30;n++){
+  const t=trade(n,at,{profit_abs:'.1'});trades.push(t);await appendEntry(local,t);
+ }
+ const kev=trade(31,at,{profit_abs:'-.2'});trades.push(kev);await appendEntry(local,kev,kevEntry(31,at));
+ const report=await refreshForwardReport(local,{history:async()=>trades});
+ assert.equal(report.strategy.closedTrades,31);assert.equal(report.strategy.netRealizedUsdt,'2.8');
+ assert.equal(report.validation.evidenceComplete,true);assert.equal(report.validation.status,'mixed_entry_policies');
+ assert.equal(report.validation.preliminarySampleAvailable,false);assert.equal(report.validation.remainingClosedTrades,null);
+ assert.equal(report.validation.stableProfitabilityValidated,false);assert.equal(report.policyCohorts.pooledSampleEligible,false);
+ const cohorts=new Map(report.policyCohorts.cohorts.map(c=>[c.entryPolicyVersion,c]));
+ assert.equal(cohorts.get(FORWARD_TRIAL_VERSION).strategy.closedTrades,30);
+ assert.equal(cohorts.get(FORWARD_TRIAL_VERSION).validation.preliminarySampleAvailable,true);
+ assert.equal(cohorts.get('kev-order-flow-v1').strategy.closedTrades,1);
+ assert.equal(cohorts.get('kev-order-flow-v1').validation.preliminarySampleAvailable,false);
+ const saved=await readJson(join(local,'forward-trial.json'));
+ assert.equal(saved.startedAt,trial.startedAt);assert.equal(saved.strategyTags.length,31);
+ await assert.rejects(recordForwardEntry(local,kevEntry(1,at)),/POLICY_CONFLICT/);
+});

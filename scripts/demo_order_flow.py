@@ -8,7 +8,7 @@ class FlowValidationError(ValueError):
         self.reason = reason
 
 
-def validate_flow(proof, mode, pair, side, now, min_taker_share='.55'):
+def validate_flow(proof, mode, pair, side, now, min_taker_share='.55', *, data_only=False):
     def need(ok, reason='data_invalid'):
         if not ok:
             raise FlowValidationError(reason)
@@ -74,10 +74,12 @@ def validate_flow(proof, mode, pair, side, now, min_taker_share='.55'):
             prior = trade
         need(end-trades[-1]['T'] <= 15000, 'tape_stale')
         directional = buy if side == 'long' else sell
-        # Diagnostics are ordered; they describe the first failing condition.
-        need(directional >= share*(buy+sell), 'taker_not_opposing')
-        need(all(depth), 'depth_not_opposing')
-        need(mids[2] > mids[0] if side == 'long' else mids[2] < mids[0], 'price_not_opposing')
+        # Kev chooses direction from valid data. Historical deterministic plans
+        # retain their original directional filters without any relaxation.
+        if not data_only:
+            need(directional >= share*(buy+sell), 'taker_not_opposing')
+            need(all(depth), 'depth_not_opposing')
+            need(mids[2] > mids[0] if side == 'long' else mids[2] < mids[0], 'price_not_opposing')
     return True
 
 

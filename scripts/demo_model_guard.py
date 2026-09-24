@@ -30,6 +30,8 @@ LEGACY_VERSION = 'kronos-native-entry-v10'
 _MINUTE_VERSIONS = (VERSION, MINUTE_LEGACY_VERSION)
 _CADENCE_KEYS = {'decisionCadenceVersion', 'decisionIntervalMs', 'decisionBoundary'}
 RULE_VERSION = 'kronos-direction-v12'
+KEV_RULE_VERSION = 'kev-order-flow-v1'
+KEV_GUARD_VERSION = 'kev-native-entry-v1'
 PROBE_VERSION = 'demo-execution-probe-v1'
 RISK_POLICY_VERSION = 'native-stop-risk-v1'
 _pending = ContextVar('demo_model_pending_entry', default=None)
@@ -41,6 +43,8 @@ _GUARD_KEYS = {'version', 'snapshotId', 'mode', 'pair', 'side', 'modelFingerprin
                'forecastCloses', 'originClose', 'atr15', 'targetAtr', 'targetFraction'}
 _HEX = re.compile(r'[a-f0-9]{64}')
 _UUID = re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}')
+MODEL_ASSIST_VERSION = 'kronos-flow-v1'
+# Retain the historical Futures-only identity for archived entry plans.
 FUTURES_MODEL_ASSIST_VERSION = 'futures-kronos-flow-v1'
 
 
@@ -125,15 +129,19 @@ def _entry_tag(plan, pair):
     return 'codex-' + sha256(payload.encode()).hexdigest()[:32]
 
 
-def _validate_futures_model_assist(ai, mode, pair, side, snapshot_id):
+def _validate_model_assist(ai, mode, pair, side, snapshot_id):
     """Validate the optional host-side Kronos direction veto in a flow plan.
 
     The producer remains advisory and never sends an order.  Native code only
     checks the compact, immutable evidence copied into the entry plan; flow,
     price, cost, risk and protection checks below remain the actual authority.
     """
-    if (mode != 'demo-futures' or not isinstance(ai, dict)
-            or ai.get('version') != FUTURES_MODEL_ASSIST_VERSION
+    current = (mode in ('demo', 'demo-futures') and isinstance(ai, dict)
+               and ai.get('version') == MODEL_ASSIST_VERSION)
+    legacy = (mode == 'demo-futures' and isinstance(ai, dict)
+              and ai.get('version') == FUTURES_MODEL_ASSIST_VERSION)
+    if (not current and not legacy
+            or not isinstance(ai, dict)
             or ai.get('usedForEntryDecision') is not True
             or ai.get('snapshotId') != snapshot_id
             or ai.get('direction') != side
@@ -153,6 +161,8 @@ def _validate_futures_model_assist(ai, mode, pair, side, snapshot_id):
 
 
 def _guard(plan, mode, pair, side):
+    if plan.get('entryPolicyVersion') == KEV_RULE_VERSION:
+        return _kev_guard(plan, mode, pair, side)
     if plan.get('entryPolicyVersion') == 'order-flow-only-v1':
         return _flow_guard(plan, mode, pair, side)
     guard = plan.get('nativeEntryGuard')
@@ -222,7 +232,7 @@ def _guard(plan, mode, pair, side):
             serialized_ulp=Decimal(str(math.ulp(float(cost_value))))
             if decimal(guard['requiredPriceSpaceBps']) < (decimal(cost_value)-serialized_ulp)*10000+30:
                 reject('COST_BUFFER_IDENTITY')
-    else:
+    elif plan.get('entrySignalEngine') != 'kronos_ai':
         momentum = confirmation.get('priceConfirmation')
         if (plan.get('entryPolicyVersion') != 'forecast-net-edge-v1'
                 or not isinstance(momentum, dict)
@@ -259,6 +269,305 @@ def _guard(plan, mode, pair, side):
 
 
 
+def _read_kev_json(path, limit):
+    try:
+        with path.open('rb') as source:
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
+            reject('KEV_EVIDENCE_SIZE')
+        value = json.loads(raw, parse_constant=lambda _: reject('KEV_EVIDENCE_INVALID'))
+        if not isinstance(value, dict):
+            reject('KEV_EVIDENCE_INVALID')
+        return value, raw
+    except (OSError, ValueError, TypeError, UnicodeError):
+        reject('KEV_EVIDENCE_UNREADABLE')
+
+
+def _kev_costs(plan, guard, mode, pair, side, snapshot, market, reviewed_state, now):
+    """Recompute host cost arithmetic from read-only facts and the fresh book.
+
+    Snapshot spread belongs to the earlier Kev request. The executable book is
+    a separate, existing bridge artifact; substituting the old spread here can
+    reject valid entries or understate the amount used for native risk sizing.
+    This is the original conservative risk estimate, not realized fill PnL.
+    """
+    config, _ = _read_kev_json(ROOT / 'config/costs.json', 8192)
+    keys = {'version', 'maxAgeSeconds', 'slippageBpsPerSide', 'priceSpaceBufferBps', 'fundingReserveEvents'}
+    if (set(config) != keys or type(config.get('version')) is not int or config['version'] != 1
+            or type(config.get('maxAgeSeconds')) is not int or not 30 <= config['maxAgeSeconds'] <= 900
+            or type(config.get('fundingReserveEvents')) is not int or not 1 <= config['fundingReserveEvents'] <= 12
+            or any(type(config.get(k)) not in (int, float) for k in ('slippageBpsPerSide', 'priceSpaceBufferBps'))
+            or not 0 <= decimal(config['slippageBpsPerSide']) <= 100
+            or not 30 <= decimal(config['priceSpaceBufferBps']) <= 1000):
+        reject('KEV_COST_CONFIG')
+    source = 'https://demo-api.binance.com' if mode == 'demo' else 'https://demo-fapi.binance.com'
+    method = 'standard_plus_tax_plus_special_no_bnb_discount' if mode == 'demo' else 'symbol_taker_rate'
+    facts = snapshot.get('costFacts')
+    if (not isinstance(facts, dict) or type(facts.get('schemaVersion')) is not int or facts['schemaVersion'] != 1
+            or facts.get('mode') != mode or facts.get('kind') != 'costs' or facts.get('readOnly') is not True
+            or facts.get('source') != source or not isinstance(facts.get('rates'), list)):
+        reject('KEV_COST_FACTS')
+    if not 0 <= now - timestamp(facts.get('observedAt')) <= config['maxAgeSeconds'] * 1000:
+        reject('KEV_COST_STALE')
+    matches = [row for row in facts['rates'] if isinstance(row, dict) and row.get('pair') == pair]
+    if (len(matches) != 1 or matches[0].get('status') != 'ok' or matches[0].get('method') != method
+            or any(not isinstance(matches[0].get(k), str) or not matches[0][k].strip() for k in ('buyRate', 'sellRate'))):
+        reject('KEV_COST_RATES')
+    buy, sell = (decimal(matches[0][key]) for key in ('buyRate', 'sellRate'))
+    if max(buy, sell) > Decimal('.1'):
+        reject('KEV_COST_RATES')
+
+    def components(quote):
+        if (not isinstance(quote, dict) or quote.get('pair') != pair or quote.get('mode') != mode
+                or quote.get('source') != source or quote.get('timeframe') != 'order-flow'
+                or quote.get('verifiedSpot' if mode == 'demo' else 'verifiedFutures') is not True
+                or type(quote.get('spreadBps')) not in (int, float)):
+            reject('KEV_COST_QUOTE')
+        bid, ask = decimal(quote.get('bid'), True), decimal(quote.get('ask'), True)
+        if ask < bid:
+            reject('KEV_COST_QUOTE')
+        spread = decimal(quote['spreadBps'])
+        with localcontext() as context:
+            context.prec = 40
+            exact_spread = (ask - bid) / bid * 10000
+            # The market producer serializes spread as a JS Number. Allow one
+            # binary64 ULP only; it is not an additional trading-cost allowance.
+            if abs(spread - exact_spread) > Decimal(str(math.ulp(float(quote['spreadBps'])))):
+                reject('KEV_COST_SPREAD')
+        if mode == 'demo-futures':
+            if not isinstance(quote.get('fundingRate'), str) or not quote['fundingRate'].strip():
+                reject('KEV_COST_FUNDING')
+            funding_rate = abs(decimal(quote['fundingRate'], signed=True))
+        else:
+            funding_rate = Decimal(0)
+        # decimal.js uses 20 significant digits for this unchanged host formula.
+        # Match its operation order while independently deriving every operand.
+        with localcontext() as context:
+            context.prec = 20
+            fees = (buy + sell) * 10000
+            funding = funding_rate * 10000 * config['fundingReserveEvents']
+            total = fees + spread + decimal(config['slippageBpsPerSide']) * 2 + funding
+            required = total + decimal(config['priceSpaceBufferBps'])
+        return dict(buyRate=buy, sellRate=sell, roundTripFeeBps=fees, spreadBps=spread,
+            slippageBpsPerSide=decimal(config['slippageBpsPerSide']), fundingReserveBps=funding,
+            fundingReserveEvents=Decimal(config['fundingReserveEvents']),
+            estimatedRoundTripCostBps=total, requiredPriceSpaceBps=required)
+
+    recorded = market.get('entryCost')
+    expected = components(market)
+    if (not isinstance(recorded, dict) or recorded.get('status') != 'ok' or recorded.get('pair') != pair
+            or recorded.get('mode') != mode or recorded.get('source') != source or recorded.get('method') != method
+            or recorded.get('observedAt') != facts['observedAt']
+            or any(decimal(recorded.get(key)) != value for key, value in expected.items())):
+        reject('KEV_COST_SNAPSHOT')
+    reviewed_markets = reviewed_state.get('markets')
+    reviewed = [row for row in reviewed_markets if isinstance(row, dict) and row.get('pair') == pair] if isinstance(reviewed_markets, list) else []
+    reviewed_cost = reviewed[0].get('costs') if len(reviewed) == 1 else None
+    reviewed_keys = ('estimatedRoundTripCostBps', 'requiredPriceSpaceBps', 'roundTripFeeBps',
+                     'slippageBpsPerSide', 'fundingReserveBps')
+    if (not isinstance(reviewed_cost, dict) or reviewed_cost.get('observedAt') != facts['observedAt']
+            or any(decimal(reviewed_cost.get(key)) != expected[key] for key in reviewed_keys)):
+        reject('KEV_COST_REVIEW')
+    stem = guard['snapshotId']
+    if plan.get('executionPolicyVersion'):
+        stem += '.' + _entry_tag(plan, pair).removeprefix('codex-')
+    quote, _ = _read_kev_json(ROOT / 'local' / mode / 'runs' / (stem + '.execution-quote.json'), 8 * 1024 * 1024)
+    if (quote.get('fetchedAt') != guard['quoteFetchedAt']
+            or not 0 <= now - timestamp(quote.get('fetchedAt')) <= 15000):
+        reject('KEV_COST_QUOTE_TIME')
+    fresh = components(quote)
+    if decimal(quote['bid' if side == 'short' else 'ask'], True) != decimal(guard['bridgeQuotePrice'], True):
+        reject('KEV_COST_QUOTE_PRICE')
+    with localcontext() as context:
+        context.prec = 20
+        expected_fraction = fresh['estimatedRoundTripCostBps'] / 10000
+    cost = decimal(plan.get('riskCostFraction'))
+    ulp = Decimal(str(math.ulp(float(plan['riskCostFraction']))))
+    if (abs(cost - expected_fraction) > ulp
+            or decimal(guard['requiredPriceSpaceBps']) != fresh['requiredPriceSpaceBps']):
+        reject('KEV_COST_PLAN')
+    # Bind every pre-send rate to the original price Kev saw. Neither the
+    # bridge quote nor a large legacy maxPriceMoveBps gets a second allowance.
+    # This limits decision quote drift; a market fill can still differ.
+    if (reviewed[0].get('quoteObservedAt') != market.get('fetchedAt')
+            or any(decimal(reviewed[0].get(key), True) != decimal(market.get(key), True) for key in ('bid', 'ask'))):
+        reject('KEV_DECISION_QUOTE_IDENTITY')
+    timestamp(market.get('fetchedAt'))
+    with localcontext() as context:
+        context.prec = 40
+        anchor = decimal(market['bid' if side == 'short' else 'ask'], True)
+        headroom = decimal(plan['targetFraction'], True) * 10000 - max(expected['requiredPriceSpaceBps'], fresh['requiredPriceSpaceBps'])
+        if headroom < 0:
+            reject('KEV_DECISION_QUOTE_BUDGET')
+        cap = min(decimal(guard['maxPriceMoveBps']), decimal(config['slippageBpsPerSide']),
+                  decimal(plan['stopFraction'], True) * 10000, headroom)
+        if abs(decimal(guard['bridgeQuotePrice'], True) - anchor) * 10000 > anchor * cap:
+            reject('KEV_DECISION_QUOTE_MOVED')
+    return dict(referencePrice=anchor, maxMoveBps=cap)
+
+
+def _kev_review(plan, guard, mode, pair, side):
+    """Bind the exact persisted host decision and source data, without model I/O."""
+    folder = ROOT / 'local' / mode / 'runs'
+    review, raw = _read_kev_json(folder / (guard['snapshotId'] + '.kev-review.json'), 262144)
+    if sha256(raw).hexdigest() != guard['kevReviewSha256']:
+        reject('KEV_REVIEW_HASH')
+    receipt = plan['entryEvidence'].get('kevReview')
+    action = 'buy' if mode == 'demo' else 'open-short' if side == 'short' else 'open-long'
+    decisions, request, response = review.get('decisions'), review.get('request'), review.get('response')
+    if (review.get('version') != 'kev-codex-entry-v1' or review.get('enabled') is not True
+            or review.get('status') != 'reviewed' or review.get('decisionMode') != 'autonomous'
+            or review.get('invoked') is not True or review.get('requestAttempted') is not True
+            or review.get('mode') != mode or review.get('snapshotId') != guard['snapshotId']
+            or not isinstance(review.get('actualModel'), str) or not review['actualModel']
+            or not isinstance(review.get('requestId'), str) or not review['requestId']
+            or any(not isinstance(review.get(k), str) or not _HEX.fullmatch(review[k])
+                   for k in ('proofSha256', 'snapshotSha256', 'configSha256'))
+            or not isinstance(decisions, list) or not decisions
+            or not isinstance(request, dict) or not isinstance(response, dict)
+            or review.get('approvedPairs') != [pair]
+            or any(not isinstance(d, dict) or type(d.get('approved')) is not bool for d in decisions)):
+        reject('KEV_REVIEW_IDENTITY')
+    approved = [d for d in decisions if d['approved']]
+    if len(approved) != 1 or (approved[0].get('pair'), approved[0].get('action'), approved[0].get('choice')) != (pair, action, 'select'):
+        reject('KEV_SELECTION')
+    state, backend = request.get('state'), response.get('backend')
+    if (request.get('model') != 'kev-codex' or response.get('model') != 'kev-codex'
+            or not isinstance(state, dict) or state.get('mode') != mode
+            or state.get('snapshotId') != guard['snapshotId'] or state.get('decisionMode') != 'autonomous'
+            or not isinstance(backend, dict) or backend.get('name') != 'codex-cli'
+            or backend.get('actual_model') != review['actualModel']
+            or backend.get('weights_loaded') is not False or backend.get('probabilities_calibrated') is not False
+            or type(backend.get('cli_calls')) is not int or backend['cli_calls'] != 1
+            or response.get('request_id') != review['requestId']):
+        reject('KEV_REVIEW_IDENTITY')
+    candidates, answers, selection = state.get('candidates'), response.get('answers'), review.get('selection')
+    if (not isinstance(candidates, list) or not 1 <= len(candidates) <= 32
+            or any(not isinstance(c, dict) or c.get('id') != 'q' + str(i) for i, c in enumerate(candidates))
+            or len(decisions) != len(candidates) or not isinstance(answers, dict) or set(answers) != {'entry'}
+            or not isinstance(answers['entry'], dict) or answers['entry'].get('type') != 'choice'
+            or not isinstance(selection, dict) or set(selection) != {'choice', 'probabilities'}
+            or selection != {k: answers['entry'].get(k) for k in ('choice', 'probabilities')}):
+        reject('KEV_SELECTION')
+    choice, probabilities = selection['choice'], selection['probabilities']
+    choices = [c['id'] for c in candidates] + ['hold']
+    if (choice not in choices[:-1] or not isinstance(probabilities, dict) or set(probabilities) != set(choices)
+            or any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values())
+            or abs(sum(probabilities.values()) - 1) > .011
+            or any(probabilities[choice] <= p for key, p in probabilities.items() if key != choice)):
+        reject('KEV_SELECTION')
+    for candidate, decision in zip(candidates, decisions):
+        chosen = candidate['id'] == choice
+        if (decision != dict(pair=candidate.get('pair'), action=candidate.get('action'), approved=chosen,
+                             choice='select' if chosen else 'hold', probabilities=probabilities)
+                or chosen and (candidate.get('pair'), candidate.get('action')) != (pair, action)):
+            reject('KEV_SELECTION')
+    expected = dict(version=review['version'], decisionMode='autonomous', provider='codex-cli', model=review['actualModel'],
+        requestId=review['requestId'], snapshotId=review['snapshotId'], snapshotSha256=review['snapshotSha256'],
+        configSha256=review['configSha256'], proofSha256=review['proofSha256'], completedAt=review.get('completedAt'), expiresAt=review.get('expiresAt'),
+        decision=approved[0], selection=selection, probabilitiesCalibrated=False)
+    if receipt != expected:
+        reject('KEV_RECEIPT_IDENTITY')
+    started, completed, expires = [timestamp(review.get(k)) for k in ('startedAt', 'completedAt', 'expiresAt')]
+    if (not guard['decisionBoundary'] <= started <= completed <= timestamp(plan.get('createdAt')) < expires
+            or expires != guard['entryDeadline'] or expires > completed + 60000):
+        reject('KEV_REVIEW_TIME')
+    snapshot, _ = _read_kev_json(folder / (guard['snapshotId'] + '.snapshot.json'), 8 * 1024 * 1024)
+    markets = snapshot.get('markets')
+    if (snapshot.get('id') != guard['snapshotId'] or snapshot.get('mode') != mode
+            or snapshot.get('timeframe') != 'order-flow'
+            or any(snapshot.get(key) != guard[key] for key in _CADENCE_KEYS)
+            or any(key in snapshot for key in ('candleBoundary', 'candles', 'model'))
+            or not isinstance(markets, list)):
+        reject('KEV_SNAPSHOT_IDENTITY')
+    selected = [m for m in markets if isinstance(m, dict) and m.get('pair') == pair]
+    if len(selected) != 1 or selected[0].get('orderFlow') != plan['entryConfirmation']['orderFlow']:
+        reject('KEV_SNAPSHOT_FLOW')
+    return _kev_costs(plan, guard, mode, pair, side, snapshot, selected[0], state, wall_ms())
+
+
+def _kev_guard(plan, mode, pair, side):
+    g, c, evidence = plan.get('nativeEntryGuard'), plan.get('entryConfirmation'), plan.get('entryEvidence')
+    keys = {'version', 'snapshotId', 'mode', 'pair', 'side', 'decisionCadenceVersion', 'decisionIntervalMs',
+            'decisionBoundary', 'entryDeadline', 'requiredPriceSpaceBps', 'bridgeQuotePrice', 'quoteFetchedAt',
+            'maxPriceMoveBps', 'leverage', 'clock', 'kevReviewSha256'}
+    forbidden = {'candleBoundary', 'atrTimeframe', 'model', 'adaptiveParameters', 'atr15', 'targetAtr', 'forecastCloses', 'modelDeadline'}
+    if (not isinstance(g, dict) or set(g) != keys or g.get('version') != KEV_GUARD_VERSION
+            or (g.get('mode'), g.get('pair'), g.get('side')) != (mode, pair, side)
+            or plan.get('ruleVersion') != KEV_RULE_VERSION or plan.get('entryPolicyVersion') != KEV_RULE_VERSION
+            or plan.get('entrySignalEngine') != 'kev_order_flow' or plan.get('purpose') != 'strategy'
+            or plan.get('timeframe') != 'order-flow' or any(k in plan for k in forbidden)
+            or not isinstance(g.get('snapshotId'), str) or not _UUID.fullmatch(g['snapshotId'])
+            or g['snapshotId'] != plan.get('snapshotId') or plan.get('tag') != _entry_tag(plan, pair)
+            or any(key not in plan or plan[key] != g.get(key) or type(plan[key]) is not type(g.get(key)) for key in _CADENCE_KEYS)
+            or g.get('decisionCadenceVersion') != 'flow-minute-v1'
+            or type(g.get('decisionIntervalMs')) is not int or g['decisionIntervalMs'] != 60000
+            or type(g.get('decisionBoundary')) is not int or g['decisionBoundary'] <= 0 or g['decisionBoundary'] % 60000
+            or type(g.get('entryDeadline')) is not int or g['entryDeadline'] != g['decisionBoundary'] + 60000
+            or not isinstance(g.get('kevReviewSha256'), str) or not _HEX.fullmatch(g['kevReviewSha256'])
+            or not isinstance(c, dict) or set(c) != {'version', 'orderFlow', 'quotePrice'} or c['version'] != 'kev-flow-confirmation-v1'
+            or not isinstance(evidence, dict) or set(evidence) != {'version', 'snapshotId', 'usedForEntryDecision', 'proofSha256', 'kevReview'}
+            or evidence.get('version') != 'kev-order-flow-evidence-v1' or evidence.get('snapshotId') != g['snapshotId']
+            or evidence.get('usedForEntryDecision') is not True
+            or not isinstance(evidence.get('proofSha256'), str) or not _HEX.fullmatch(evidence['proofSha256'])
+            or decimal(plan.get('stopFraction'), True) != Decimal('.005') or decimal(plan.get('targetFraction'), True) != Decimal('.015')
+            or type(plan.get('maxHoldingSeconds')) is not int or plan['maxHoldingSeconds'] != 900
+            or type(plan.get('maxHoldingBars')) is not int or plan['maxHoldingBars'] != 0
+            or plan.get('profitProtection') != dict(version='net-profit-trail-v1', triggerNetUsdt=.5, givebackNetUsdt=.25, riskMultiple=.5)):
+        reject('KEV_GUARD_IDENTITY')
+    raw = json.dumps(c['orderFlow'], separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    if sha256(raw.encode()).hexdigest() != evidence['proofSha256']:
+        reject('FLOW_PROOF_HASH')
+    if decimal(g['bridgeQuotePrice'], True) != decimal(c['quotePrice'], True):
+        reject('KEV_GUARD_IDENTITY')
+    cost = decimal(plan.get('riskCostFraction'))
+    ulp = Decimal(str(math.ulp(float(plan['riskCostFraction']))))
+    if decimal(g['requiredPriceSpaceBps']) < (cost - ulp) * 10000 + 30:
+        reject('COST_BUFFER_IDENTITY')
+    if decimal(g['leverage'], True) != 1:
+        reject('LEVERAGE_INVALID')
+    decimal(g['maxPriceMoveBps'])
+    timestamp(g['quoteFetchedAt'])
+    price_guard = _kev_review(plan, g, mode, pair, side)
+    # Derived in memory from persisted source evidence; never trust a host-
+    # supplied audit result or add these fields to historical entry plans.
+    return dict(g, _decisionQuote=price_guard)
+
+
+def _validate_kev(permit, now):
+    plan, mode = permit['plan'], permit['mode']
+    _validate_risk(permit)
+    g = _kev_guard(plan, mode, permit['pair'], permit['side'])
+    try:
+        validate_flow(plan['entryConfirmation']['orderFlow'], mode, permit['pair'], permit['side'], now, data_only=True)
+    except Exception:
+        reject('FLOW_EVIDENCE')
+    lower, upper = clock_range(g['clock'], mode, now)
+    boundary, deadline = g['decisionBoundary'], g['entryDeadline']
+    if lower < boundary or upper >= deadline:
+        reject('DEADLINE')
+    created = timestamp(plan['createdAt'])
+    recorded_lower = g['clock']['serverTime']
+    recorded_upper = recorded_lower + g['clock']['receivedAt'] - g['clock']['requestStartedAt']
+    if (created + lower - now < boundary or created + upper - now >= deadline
+            or recorded_lower < boundary or recorded_upper >= deadline):
+        reject('DECISION_MINUTE_IDENTITY')
+    if not 0 <= now - timestamp(g['quoteFetchedAt']) <= 15000:
+        reject('QUOTE_STALE')
+    with localcontext() as context:
+        context.prec = 40
+        target, stop, cost = decimal(plan['targetFraction'], True), decimal(plan['stopFraction'], True), decimal(plan['riskCostFraction'])
+        if target * 10000 < decimal(g['requiredPriceSpaceBps']):
+            reject('KEV_PRICE_SPACE')
+        if target - cost <= stop + cost:
+            reject('NET_REWARD_RISK')
+        if abs(decimal(permit['rate'], True) / decimal(g['bridgeQuotePrice'], True) - 1) * 10000 > decimal(g['maxPriceMoveBps']):
+            reject('PRICE_MOVED')
+        anchor, cap = g['_decisionQuote']['referencePrice'], g['_decisionQuote']['maxMoveBps']
+        if abs(decimal(permit['rate'], True) - anchor) * 10000 > anchor * cap:
+            reject('KEV_DECISION_QUOTE_MOVED')
+
+
 def _flow_guard(plan, mode, pair, side):
     g, c, evidence = plan.get('nativeEntryGuard'), plan.get('entryConfirmation'), plan.get('entryEvidence')
     keys = {'version','snapshotId','mode','pair','side','candleBoundary','entryDeadline','requiredPriceSpaceBps','bridgeQuotePrice','atr15','targetAtr','targetFraction','quoteFetchedAt','maxPriceMoveBps','leverage','clock'}
@@ -281,7 +590,8 @@ def _flow_guard(plan, mode, pair, side):
     if (not isinstance(g, dict) or set(g) != keys or g['version'] not in (*_MINUTE_VERSIONS, LEGACY_VERSION)
             or (g['mode'],g['pair'],g['side']) != (mode,pair,side)
             or plan.get('purpose') != 'strategy' or plan.get('ruleVersion') != RULE_VERSION
-            or plan.get('entrySignalEngine') != 'sampled_order_flow' or plan.get('model') is not None
+            or plan.get('entrySignalEngine') not in ('sampled_order_flow','sampled_order_flow+kronos_advisory')
+            or plan.get('model') is not None
             or not isinstance(g['snapshotId'],str) or not _UUID.fullmatch(g['snapshotId'])
             or g['snapshotId'] != plan.get('snapshotId') or plan.get('tag') != _entry_tag(plan,pair)
             or not isinstance(evidence,dict) or evidence.get('version') != 'order-flow-evidence-v1'
@@ -294,13 +604,16 @@ def _flow_guard(plan, mode, pair, side):
             or c['confirmationAt'] != g['candleBoundary'] or plan.get('atrTimeframe') != '15m'
             or current and plan.get('timeframe') != '5m'):
         reject('FLOW_GUARD_IDENTITY')
+    ai = evidence.get('aiAssist')
+    if plan.get('entrySignalEngine') == 'sampled_order_flow+kronos_advisory' and not isinstance(ai, dict):
+        reject('MODEL_ASSIST_IDENTITY')
     # JSON property order is preserved from the host; proof fields contain only
     # integer timestamps/IDs and string prices/quantities, matching JSON.stringify.
     raw = json.dumps(c['orderFlow'], separators=(',',':'), ensure_ascii=False)
     if sha256(raw.encode()).hexdigest() != evidence['proofSha256']:
         reject('FLOW_PROOF_HASH')
-    if evidence.get('aiAssist') is not None:
-        _validate_futures_model_assist(evidence['aiAssist'], mode, pair, side, g['snapshotId'])
+    if ai is not None:
+        _validate_model_assist(ai, mode, pair, side, g['snapshotId'])
     try:
         validate_flow(c['orderFlow'],mode,pair,side,timestamp(g['quoteFetchedAt']))
     except Exception:
@@ -470,6 +783,10 @@ def _validate(permit, now, mono):
         reject('CLOCK_JUMP')
     if not 0 <= now - timestamp(plan['createdAt']) <= 120000:
         reject('PLAN_EXPIRED')
+    if (plan.get('ruleVersion') == KEV_RULE_VERSION or plan.get('entryPolicyVersion') == KEV_RULE_VERSION
+            or plan.get('nativeEntryGuard', {}).get('version') == KEV_GUARD_VERSION):
+        _validate_kev(permit, now)
+        return
     if not model:
         return
     _validate_risk(permit)
@@ -542,7 +859,7 @@ def record_callback_rejection(plan, mode, pair, tag, reason):
         native = plan.get('nativeEntryGuard')
         if (not isinstance(native, dict) or native.get('mode') != mode
                 or native.get('pair') != pair or native.get('snapshotId') != plan['snapshotId']
-                or native.get('version') not in (*_MINUTE_VERSIONS, LEGACY_VERSION)):
+                or native.get('version') not in (*_MINUTE_VERSIONS, LEGACY_VERSION, KEV_GUARD_VERSION)):
             return False
         boundary = plan.get('decisionBoundary', native.get('candleBoundary'))
         if type(boundary) is not int or boundary <= 0:
@@ -600,7 +917,7 @@ def authorize_entry(exchange, plan, mode, pair, side, amount, rate, order_type):
                 or plan.get('maxHoldingSeconds') != 90 or plan.get('maxHoldingBars') != 1
                 or decimal(plan.get('maxEntryNotionalUsdt'), True) > 25):
             reject('PROBE_IDENTITY')
-    elif plan.get('ruleVersion') != RULE_VERSION:
+    elif plan.get('ruleVersion') not in (RULE_VERSION, KEV_RULE_VERSION):
         reject('ENTRY_VERSION')
     permit = dict(owner=exchange, mode=mode, pair=pair, side=side, amount=amount, rate=rate,
                   plan=copy.deepcopy(plan), wall=wall_ms(), mono=monotonic_ms(), wireSent=False)
@@ -626,7 +943,7 @@ def order_context(exchange, *, pair, side, amount, rate, leverage, reduce_only, 
                 or order_type != 'market'):
             reject('PERMIT_REQUIRED_OR_MISMATCH')
         expected_leverage = (permit['plan']['nativeEntryGuard']['leverage']
-                             if permit['plan']['ruleVersion'] == RULE_VERSION else 1)
+                             if permit['plan']['ruleVersion'] in (RULE_VERSION, KEV_RULE_VERSION) else 1)
         if decimal(leverage, True) != decimal(expected_leverage, True):
             reject('LEVERAGE_MISMATCH')
         _validate(permit, wall_ms(), monotonic_ms())

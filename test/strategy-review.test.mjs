@@ -15,6 +15,17 @@ function fixture(id,net,quality='flow-confirmed-exit-v2',open=false){
  return {t,j:[pending,{id:key,status:'submitted',tradeId:id,at:new Date(at-40000).toISOString()}]};
 }
 const review=items=>buildStrategyReview({mode,observedAt,trades:items.map(x=>x.t),journal:items.flatMap(x=>x.j)});
+test('current Kev cohort is marked prospectively without absorbing historical strategy losses',()=>{
+ const old=fixture(1,'-.6'),fresh=fixture(2,'.2');fresh.j[0].entryPolicyVersion='kev-order-flow-v1';
+ delete fresh.j[0].executionQualityVersion;
+ const r=buildStrategyReview({mode,observedAt,currentEntryPolicyVersion:'kev-order-flow-v1',
+  trades:[old.t,fresh.t],journal:[...old.j,...fresh.j]});
+ assert.equal(r.cohorts[0].key,'kev-order-flow-v1 / not-applicable');assert.equal(r.cohorts[0].current,true);
+ assert.deepEqual(r.cohorts[0].tradeIds,[2]);assert.equal(r.cohorts[0].netRealizedUsdt,'0.2');
+ assert.equal(r.cohorts.find(c=>c.tradeIds.includes(1)).current,false);assert.equal(r.aggregateNetRealizedUsdt,'-0.4');
+ const empty=buildStrategyReview({mode,observedAt,currentEntryPolicyVersion:'kev-order-flow-v1',trades:[old.t],journal:old.j});
+ assert.equal(empty.cohorts[0].closedCount,0);assert.equal(empty.cohorts[0].winRate,null);
+});
 test('new cohort does not absorb older wins or erase losses and reports actual net payoff',()=>{
  const a=fixture(1,'-.6','flow-strength-exit-v1'),b=fixture(2,'.2'),c=fixture(3,'-.4'),d=fixture(4,'.1',undefined,true);
  const r=review([a,b,c,d]),fresh=r.cohorts[0];

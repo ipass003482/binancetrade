@@ -15,7 +15,7 @@ from pathlib import Path
 from ccxt import ROUND_DOWN, ROUND_UP
 
 from freqtrade.exceptions import InvalidOrderException, InsufficientFundsError, TemporaryError
-from demo_model_guard import order_context, VERSION as NATIVE_ENTRY_GUARD_VERSION, RISK_POLICY_VERSION
+from demo_model_guard import order_context, VERSION as NATIVE_ENTRY_GUARD_VERSION, RISK_POLICY_VERSION, KEV_GUARD_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTECTION_VERSION = 'demo-native-stop-v1'
@@ -76,7 +76,7 @@ class GuardedDemoStops:
             'active_order_observed' if state['activeStops'] else 'no_active_order_observed')
         state.update(engineVersion=ENGINE_VERSION, asOf=datetime.now(timezone.utc).isoformat(),
                      processId=os.getpid(), cancelReconciliationVersion=CANCEL_RECONCILIATION_VERSION,
-                     nativeEntryGuardVersion=NATIVE_ENTRY_GUARD_VERSION, riskPolicyVersion=RISK_POLICY_VERSION,
+                     nativeEntryGuardVersion=NATIVE_ENTRY_GUARD_VERSION, kevEntryGuardVersion=KEV_GUARD_VERSION, riskPolicyVersion=RISK_POLICY_VERSION,
                      stopPriceVersion='stable-unarmed-stop-v1',
                      stopLimitRatio=(self._config.get('order_types', {}).get('stoploss_on_exchange_limit_ratio')
                                      if self._protection_mode == 'demo' else None))

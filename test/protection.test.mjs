@@ -42,6 +42,15 @@ async function fixture(t,{futures=false,position=false}={}){
 }
 async function rejects(f,code){await f.save();await assert.rejects(assertNativeProtection(f.args),error=>error.code===code&&error.message===code);}
 
+test('Kev entries require the loaded native Kev guard while historical checks remain compatible',async t=>{
+ const f=await fixture(t);
+ assert.equal((await assertNativeProtection(f.args)).verified,true);
+ f.args.entryPolicyVersion='kev-order-flow-v1';
+ await rejects(f,'NATIVE_KEV_GUARD_RESTART_REQUIRED');
+ f.state.kevEntryGuardVersion='kev-native-entry-v1';await f.save();
+ assert.equal((await assertNativeProtection(f.args)).verified,true);
+});
+
 test('new host rejects an old loaded risk guard and a wider native limit interval',async t=>{
  const f=await fixture(t);delete f.state.riskPolicyVersion;
  await rejects(f,'NATIVE_RISK_POLICY_RESTART_REQUIRED');

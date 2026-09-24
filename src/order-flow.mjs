@@ -9,10 +9,12 @@ export const SPOT_FLOW_CONTINUATION_VERSION='flow-price-continuation-v1';
 export const FUTURES_FLOW_CONTINUATION_VERSION='flow-futures-price-continuation-v1';
 export const FLOW_POLICY='trend-pullback-flow-v1';
 export const FLOW_VERSION='sampled-demo-flow-v1';
-// Futures-only advisory route: the pinned Kronos observer may veto a flow
-// direction, but it never replaces the native flow, cost, sizing or protection
-// checks. Spot remains on the existing order-flow-only route so the new cohort
-// can be measured separately.
+// Demo advisory route: the pinned Kronos observer may veto a flow direction in
+// both Spot and Futures, but it never replaces the native flow, cost, sizing or
+// protection checks. A valid model forecast is required before a new entry;
+// missing, stale or contradictory evidence fails closed to HOLD.
+export const MODEL_ASSIST_VERSION='kronos-flow-v1';
+// Keep the old version name for archived futures snapshots and manifests.
 export const FUTURES_MODEL_ASSIST_VERSION='futures-kronos-flow-v1';
 // A negative Demo fill is evidence that the immediately sampled direction
 // failed for that pair. Block only that pair for a short, bounded period;
@@ -38,8 +40,29 @@ export function recentLossCooldowns(history,{now=Date.now(),cooldownMs=FLOW_LOSS
 // they are an observed Demo hypothesis, not a forecast or profit claim.
 export const FLOW_SELECTIVITY=Object.freeze({version:'flow-selectivity-v2',minimumMidChangeBps:'0.25',maximumDepthImbalance:'0.7'});
 export const FLOW_MAX_AGE_MS=45000;
+// Kev's live route requires the two independent sides of the sampled
+// microstructure signal to agree.  A taker-only or book-only signal is useful
+// for research, but it is never an entry authorization. The collector keeps
+// three depth snapshots; the latest two must support the same book direction
+// so one noisy first snapshot does not suppress an otherwise coherent sample.
+export const FLOW_ALIGNMENT_VERSION='flow-tape-book-alignment-v2';
+export const FLOW_BOOK_CONSENSUS_VERSION='latest-two-of-three-v1';
+// Entry-only shock guard.  A sampled order-flow signal is not reliable when
+// the mid price gaps or the executable spread widens sharply; in that state
+// the route must wait for a fresh, tradable sample instead of chasing the
+// move.  Exits continue to be handled by the native protection orders.
+export const FLOW_SHOCK_GUARD=Object.freeze({version:'flow-shock-guard-v1',maxAbsMidChangeBps:'35',maxSpreadBps:'15'});
 const fail=reason=>({status:'unavailable',eligible:false,reason});
 const positive=v=>{if(!['string','number'].includes(typeof v))throw Error();const x=new Decimal(v);if(!x.isFinite()||x.lte(0)||Math.abs(x.e)>50)throw Error();return x;};
+export function assessFlowShock(metrics,{spreadBps,maxAbsMidChangeBps=FLOW_SHOCK_GUARD.maxAbsMidChangeBps,maxSpreadBps=FLOW_SHOCK_GUARD.maxSpreadBps}={}){
+ try{
+  const move=new Decimal(metrics?.midChangeBps),spread=new Decimal(spreadBps),moveLimit=new Decimal(maxAbsMidChangeBps),spreadLimit=new Decimal(maxSpreadBps);
+  if(!move.isFinite()||!spread.isFinite()||!moveLimit.isFinite()||!spreadLimit.isFinite()||moveLimit.lte(0)||spreadLimit.lte(0)||spread.lt(0))throw Error();
+  if(move.abs().gte(moveLimit))return {version:FLOW_SHOCK_GUARD.version,status:'ok',eligible:false,reason:'FLOW_VOLATILITY_SHOCK',midChangeBps:move.toFixed(),spreadBps:spread.toFixed(),maxAbsMidChangeBps:moveLimit.toFixed(),maxSpreadBps:spreadLimit.toFixed()};
+  if(spread.gt(spreadLimit))return {version:FLOW_SHOCK_GUARD.version,status:'ok',eligible:false,reason:'FLOW_LIQUIDITY_SHOCK',midChangeBps:move.toFixed(),spreadBps:spread.toFixed(),maxAbsMidChangeBps:moveLimit.toFixed(),maxSpreadBps:spreadLimit.toFixed()};
+  return {version:FLOW_SHOCK_GUARD.version,status:'ok',eligible:true,reason:null,midChangeBps:move.toFixed(),spreadBps:spread.toFixed(),maxAbsMidChangeBps:moveLimit.toFixed(),maxSpreadBps:spreadLimit.toFixed()};
+ }catch{return {version:FLOW_SHOCK_GUARD.version,status:'unavailable',eligible:false,reason:'FLOW_SHOCK_DATA_INVALID'};}
+}
 // Prospective spot-entry hypothesis: the currently offered buying price must
 // still be above the start of the sampled signal. This is not a return forecast.
 export function assessSpotFlowContinuation(proof,quote){
@@ -72,7 +95,7 @@ export function assessFuturesFlowContinuation(proof,quote,{long}={}){
 // Ten-second depth samples are not a full event-by-event order book or OFI.
 // 55% taker notional, persistent depth support and favorable mid-price change
 // form one prospective hypothesis; thresholds are not fitted win probabilities.
-export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55',minMidChangeBps='0',maxDepthImbalance='1'}={}){
+export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55',minMidChangeBps='0',maxDepthImbalance='1',dataOnly=false}={}){
  try{
   const minimum=new Decimal(minTakerShare);
   const minimumMove=new Decimal(minMidChangeBps),maximumDepth=new Decimal(maxDepthImbalance);
@@ -107,12 +130,36 @@ export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55',mi
    const n=positive(t.p).mul(positive(t.q));if(t.m)sell=sell.plus(n);else buy=buy.plus(n);prior=t;
   }
   if(endTime-trades.at(-1).T>15000)return fail('FLOW_TAPE_STALE');
-  const directional=long?buy:sell,total=buy.plus(sell),share=directional.div(total);
-  const depth=imbalances.every(v=>long?v.gt(0):v.lt(0));
+  const total=buy.plus(sell),buyShare=buy.div(total),
+   tapeDirection=buy.gt(sell)?'buy':sell.gt(buy)?'sell':null,
+   bookSigns=imbalances.map(v=>v.gt(0)?'buy':v.lt(0)?'sell':null),
+   latestBookSign=bookSigns.at(-1),previousBookSign=bookSigns.at(-2),
+   bookDirection=latestBookSign&&latestBookSign===previousBookSign?latestBookSign:null,
+   midChangeBps=mids[2].div(mids[0]).minus(1).mul(10000);
+  if(dataOnly)return {status:'ok',eligible:true,reason:null,buyNotional:buy.toFixed(),sellNotional:sell.toFixed(),
+   buyTakerShare:buyShare.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),
+   midChangeBps:midChangeBps.toFixed(),tapeDirection,bookDirection,directionsAgree:tapeDirection!==null&&tapeDirection===bookDirection,
+   alignmentVersion:FLOW_ALIGNMENT_VERSION,bookConsensusVersion:FLOW_BOOK_CONSENSUS_VERSION,
+   bookSigns,latestBookSign,previousBookSign,sampledAt:latest,tradeCount:trades.length};
+  const directional=long?buy:sell,share=directional.div(total),requestedDirection=long?'buy':'sell',
+   tapeAligned=tapeDirection===requestedDirection&&share.gte(minimum),
+   bookAligned=bookDirection===requestedDirection,
+   directionsAgree=tapeDirection!==null&&tapeDirection===bookDirection;
+  const depth=bookAligned;
   const depthWithinBounds=imbalances.every(v=>v.abs().lte(maximumDepth));
-  const midChangeBps=mids[2].div(mids[0]).minus(1).mul(10000);
   const movement=long?midChangeBps.gte(minimumMove):midChangeBps.lte(minimumMove.neg());
-  const eligible=directional.gte(total.mul(minimum))&&depth&&depthWithinBounds&&movement;
-  return {status:'ok',eligible,reason:eligible?null:'FLOW_NOT_ALIGNED',takerShare:share.toFixed(),minimumTakerShare:minimum.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),midChangeBps:midChangeBps.toFixed(),minimumMidChangeBps:minimumMove.toFixed(),maximumDepthImbalance:maximumDepth.toFixed(),depthWithinBounds,sampledAt:latest};
+  const eligible=tapeAligned&&depth&&depthWithinBounds&&movement;
+  const reason=eligible?null:!tapeAligned||!bookAligned||!directionsAgree?'FLOW_TAPE_BOOK_MISMATCH':!depthWithinBounds?'FLOW_BOOK_IMBALANCE_TOO_LARGE':'FLOW_MID_MOVE_NOT_CONFIRMED';
+  return {status:'ok',eligible,reason,takerShare:share.toFixed(),minimumTakerShare:minimum.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),
+   midChangeBps:midChangeBps.toFixed(),minimumMidChangeBps:minimumMove.toFixed(),maximumDepthImbalance:maximumDepth.toFixed(),depthWithinBounds,
+   tapeDirection,bookDirection,requestedDirection,tapeAligned,bookAligned,directionsAgree,alignmentVersion:FLOW_ALIGNMENT_VERSION,
+   bookConsensusVersion:FLOW_BOOK_CONSENSUS_VERSION,bookSigns,latestBookSign,previousBookSign,
+   shadowOnly:!eligible&&(tapeAligned||bookAligned||tapeDirection!==null||bookDirection!==null),sampledAt:latest};
  }catch{return fail('FLOW_DATA_INVALID');}
+}
+// Data integrity is independent of the side Kev chooses. The live Kev route
+// performs the side-specific alignment check separately; this helper only
+// validates that the sampled tape/book payload is structurally trustworthy.
+export function validateOrderFlowData(proof,{mode,pair,now=Date.now()}={}){
+ return assessOrderFlow(proof,{mode,pair,now,long:true,dataOnly:true});
 }

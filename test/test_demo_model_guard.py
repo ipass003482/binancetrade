@@ -78,6 +78,13 @@ def test_native_callback_requires_model_proof_but_preserves_persisted_exit_plan(
     assert strategy.custom_exit(value['pair'], trade, NOW + timedelta(hours=4), 100, 0) == 'rules_time'
 
 
+def test_ai_entry_authority_does_not_require_price_momentum(frozen):
+    value = plan(False)
+    value['entrySignalEngine'] = 'kronos_ai'
+    value['entryConfirmation']['priceConfirmation']['eligible'] = False
+    assert authorize(fake_exchange('demo'), value)
+
+
 @pytest.mark.parametrize('short', [False, True])
 def test_native_quote_requires_forecast_to_cover_full_costs_and_buffer(frozen, short):
     value, exchange = plan(short), fake_exchange('demo-futures' if short else 'demo')
@@ -600,6 +607,36 @@ def flow_only_plan(short=False):
         g.pop(k)
     g['entryDeadline']=g.pop('modelDeadline')
     return value
+
+
+def flow_ai_plan(short=False):
+    value = flow_only_plan(short)
+    mode = 'demo-futures' if short else 'demo'
+    origin = '100'
+    path = ['99.9', '99.8', '99.7'] if short else ['100.1', '100.2', '100.3']
+    value['entrySignalEngine'] = 'sampled_order_flow+kronos_advisory'
+    value['entryEvidence']['aiAssist'] = {
+        'version': 'kronos-flow-v1', 'usedForEntryDecision': True,
+        'snapshotId': value['snapshotId'], 'direction': 'short' if short else 'long',
+        'modelFingerprint': 'a' * 64, 'predictionSha256': 'b' * 64,
+        'issuedAt': (NOW - timedelta(seconds=1)).isoformat(),
+        'originClose': origin, 'forecastCloses': path,
+        'forecastMoveBps': '30'
+    }
+    return value
+
+
+@pytest.mark.parametrize('short', [False, True])
+def test_flow_ai_assist_native_callback_context_and_wire(frozen, short):
+    value = flow_ai_plan(short)
+    mode = 'demo-futures' if short else 'demo'
+    exchange = fake_exchange(mode)
+    assert authorize(exchange, value)
+    with guard.order_context(exchange, pair=value['pair'], side='sell' if short else 'buy', amount=.25,
+                             rate=100, leverage=1, reduce_only=False, initial_order=True, order_type='market'):
+        guard.guard_order_wire(exchange,
+            'https://demo-fapi.binance.com/fapi/v1/order' if short else 'https://demo-api.binance.com/api/v3/order',
+            'POST', 'symbol=ETHUSDT&side='+('SELL' if short else 'BUY')+'&type=MARKET&quantity=0.25')
 
 
 @pytest.mark.parametrize('short',[False,True])

@@ -13,7 +13,8 @@ test('switching from expanded spot pair to futures selects an allowed futures pa
 });
 test('Demo limits are separate; spot expansion does not expand futures or dry-run',async()=>{
  const dry=await loadPolicy(),spot=await loadPolicy('demo'),f=await loadPolicy('demo-futures');
- assert.equal(spot.pairs.length,10);assert.equal(f.pairs.length,4);assert.equal(dry.pairs.length,4);
+ assert.equal(spot.pairs.length,12);assert.ok(spot.pairs.includes('NVDAB/USDT'));assert.ok(spot.pairs.includes('AMZNB/USDT'));
+ assert.equal(f.pairs.length,4);assert.equal(dry.pairs.length,4);
  assert.equal(dry.maxDailyLossUsdt,'20');assert.equal(spot.maxDailyLossUsdt,'50');assert.equal(f.maxDailyLossUsdt,'50');
  assert.equal(spot.maxExposureUsdt,'900');assert.equal(spot.maxOpenTrades,3);assert.equal(spot.maxEntriesPerDay,0);assert.equal(f.maxEntriesPerDay,0);assert.equal(dry.maxEntriesPerDay,4);
  assert.equal(f.maxStakeUsdt,'150');assert.equal(f.maxExposureUsdt,'150');assert.equal(f.maxTotalNotionalUsdt,'150');assert.equal(f.leverage,1);

@@ -8,8 +8,8 @@ import {stopExecutionReserve} from './demo-risk.mjs';
 const Decimal=DecimalBase.clone({precision:64});
 const MODES=['demo','demo-futures'];
 export const PORTFOLIO_SOURCE='freqtrade-demo-portfolio';
-export const PORTFOLIO_DEFAULTS=Object.freeze({version:1,capitalUsdt:'2000',maxGrossExposureUsdt:'1050',
- maxOpenRiskUsdt:'4',maxDailyLossUsdt:'50',maxDrawdownUsdt:'100',maxSnapshotAgeSeconds:15,blockOppositeSameBase:true});
+export const PORTFOLIO_DEFAULTS=Object.freeze({version:1,capitalUsdt:'2000',maxGrossExposureUsdt:'400',
+ maxOpenRiskUsdt:'10',maxDailyLossUsdt:'50',maxDrawdownUsdt:'100',maxSnapshotAgeSeconds:15,blockOppositeSameBase:true});
 const fail=code=>{throw new Error(code);};
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const timestamp=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));

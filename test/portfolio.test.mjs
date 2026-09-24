@@ -57,7 +57,7 @@ test('shared portfolio includes native stop reserve for new entries and marked o
 
 test('checked config fixes the shared budget and preserves hard guard ceilings',async()=>{
  assert.deepEqual(await loadPortfolioConfig(),config());
- for(const [name,value] of Object.entries({capitalUsdt:'2001',maxGrossExposureUsdt:'1051',maxOpenRiskUsdt:'4.01',maxDailyLossUsdt:'51',
+ for(const [name,value] of Object.entries({capitalUsdt:'2001',maxGrossExposureUsdt:'1051',maxOpenRiskUsdt:'10.01',maxDailyLossUsdt:'51',
   maxDrawdownUsdt:'101',maxSnapshotAgeSeconds:16,blockOppositeSameBase:false,version:2}))
   assert.throws(()=>validatePortfolioConfig({...config(),[name]:value}),/PORTFOLIO_CONFIG_INVALID/);
  for(const value of [null,true,'',Infinity,'1e999','-1','0'])assert.throws(()=>validatePortfolioConfig({...config(),capitalUsdt:value}),/PORTFOLIO_CONFIG_INVALID/);
@@ -90,7 +90,7 @@ test('combined gross exposure is enforced across both engines',()=>{
 });
 
 test('combined persisted stop and cost risk is capped even while gross stays below cap',()=>{
- const g=guard();add(g,position(1,'demo',{stake_amount:200,amount:2,current_rate:100}),'demo',{stopFraction:'.02',riskCostFraction:0});
+ const g=guard();add(g,position(1,'demo',{stake_amount:200,amount:2,current_rate:100}),'demo',{stopFraction:'.02',riskCostFraction:'.03'});
  rejects(g,'PORTFOLIO_OPEN_RISK_LIMIT');
 });
 

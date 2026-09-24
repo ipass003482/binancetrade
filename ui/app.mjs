@@ -89,9 +89,9 @@ function renderOperations(){
   !ops?'等待讀取引擎、排程與風控狀態。':ops.stopped?'新進場已暫停；現有持倉退出仍由交易引擎管理。':
   ops.healthy===false?'有運行或資料異常需要處理；請查看下列原因。':ops.entryWait?
   reasonLabel(ops.entryWait.reason)+(ops.entryWait.reviewRequired?'。風險保護維持生效，需先檢視。':'。程式會在下一輪重新檢查，不取消風控限制。'):
-  ops.entryState==='starting'?'排程正在啟動，等待第一輪訂單流與已收盤 K 線檢查。':
+  ops.entryState==='starting'?'排程正在啟動，等待第一輪市場資料與風控檢查。':
   ops.entryState==='waiting_signal'?'排程正常，最新訊號尚未形成可執行交易。':
-  ops.watchRunning?(liveDemo?'每 1 分鐘檢查新訂單流與報價；5m 已收盤 K 線只供風險與觀察。訊號與風控通過後送出 Demo 訂單。':'排程持續檢查資料；訊號與風控通過後執行模擬決策。'):'目前沒有持續排程，請以運行狀態為準。';
+  ops.watchRunning?(liveDemo?(data?.strategy?.entryPolicyVersion==='kev-order-flow-v1'?'每分鐘由 Kev 根據訂單簿與主動成交選幣及方向；通過成本與風控後送出 Demo 訂單。':'每分鐘檢查市場資料；訊號與風控通過後送出 Demo 訂單。'):'排程持續檢查資料；訊號與風控通過後執行模擬決策。'):'目前沒有持續排程，請以運行狀態為準。';
  text('operations-notice',notice);
  const allowance=ops?.dailyEntryAllowance;
  text('operations-allowance',allowance?.unlimited===true?'未設定次數上限':Number.isSafeInteger(allowance?.remaining)?number(allowance.remaining,0)+' / '+number(allowance.limit,0)+' 次':'—');
@@ -175,6 +175,12 @@ function renderPortfolio(){
 let selected=31,marketIdentity=null;
 function renderTiming(){
  const v=timingView({...store.state,elapsedMs:performance.now()-(store.state.dataReceivedMono??performance.now())});
+ const kev=store.state.data?.strategy?.entryPolicyVersion==='kev-order-flow-v1',panel=document.querySelector('.timing-panel');
+ panel.querySelector('h2').textContent=kev?'Kev 訂單流決策時間':'判斷與 K 線時間監控';
+ panel.setAttribute('aria-label',kev?'Kev 訂單流決策時間':'判斷與 K 線時間監控');
+ const labels=panel.querySelectorAll('dt');labels[1].textContent=kev?'最後訂單簿取樣':'最後 K 線收盤（已取得）';
+ labels[2].textContent=kev?'訂單簿新鮮度':'K 線延遲';labels[3].textContent=kev?'K 線依賴':'下一根 K 線收盤';
+ panel.querySelector('.panel-foot').textContent=kev?'台灣時間 · 每分鐘使用新訂單流決策 · 訊號在下一分鐘失效':'台灣時間 · 每秒更新倒數 · 依當前策略的資料與期限檢查';
  text('timing-status',v.status);$('timing-status').dataset.tone=v.tone;
  for(const key of ['clock','lastClose','delay','nextCandle','nextResearch','expiry'])text('timing-'+key,v[key]);
 }
@@ -277,6 +283,16 @@ function renderForward(){
 setInterval(renderTiming,1000);
 function drawChart(){
  const market=store.state.market,candles=market?.candles,target=$('chart');target.replaceChildren();
+ if(market?.timeframe==='order-flow'){
+  const book=market.orderFlow?.books?.at(-1),trades=market.orderFlow?.trades??[];
+  const table=element('table'),head=element('tr');
+  for(const label of ['買價','買量','賣價','賣量'])head.append(element('th','',label));table.append(head);
+  for(let i=0;i<Math.max(book?.bids?.length??0,book?.asks?.length??0);i++){
+   const row=element('tr');for(const value of [book?.bids?.[i]?.[0],book?.bids?.[i]?.[1],book?.asks?.[i]?.[0],book?.asks?.[i]?.[1]])row.append(element('td','',value??'—'));table.append(row);
+  }
+  target.append(table,element('p','',book?'取樣 '+dateTime(book.at)+' · 60 秒成交 '+trades.length+' 筆':'等待有效訂單簿取樣'));
+  target.setAttribute('aria-label',market.pair+' 即時前五檔訂單簿與主動成交流');$('candle').disabled=true;return;
+ }
  if(!candles?.length){target.append(element('span','',store.state.marketError??'WAITING FOR MARKET DATA'));target.setAttribute('aria-label','行情尚未取得');$('candle').disabled=true;for(const id of ['candle-time','candle-open','candle-high','candle-low','candle-close','candle-index'])text(id,'—');return;}
  const identity=market.mode+market.pair+market.fetchedAt;
  if(identity!==marketIdentity){marketIdentity=identity;selected=candles.length-1;}
@@ -311,16 +327,19 @@ function render(){
  text('pnl-label',data?.session?'本驗證輪已實現':'引擎歷史已實現');
  text('pnl-scope',data?.session?'本輪各版本／驗證單 · 已含費用':'含舊版策略／驗證單 · 已含費用');
  const futures=mode==='demo-futures',pairs=data?.policy?.pairs??['BTC','ETH','SOL','BNB'].map(p=>p+'/USDT'+(futures?':USDT':''));
+ const kevFlow=data?.strategy?.entryPolicyVersion==='kev-order-flow-v1';
+ for(const selector of ['.scan','.ohlc','.landscape-panel','.dimensions-panel'])document.querySelector(selector).hidden=kevFlow;
+ document.querySelector('.market-panel h2').textContent=kevFlow?'即時訂單簿':'市場軌跡';
  if([...$('pair').options].map(o=>o.value).join()!==pairs.join()){$('pair').replaceChildren(...pairs.map(p=>{const o=element('option','',p);o.value=p;return o;}));}
  $('pair').value=store.state.pair;
- text('market-timeframe',market?.timeframe??data?.strategy?.timeframe??'—');
+ text('market-timeframe',kevFlow?'ORDER FLOW':market?.timeframe??data?.strategy?.timeframe??'—');
  text('landscape-count','探索最近 '+(market?.candles?.length??'—')+' 根 K 線');
  text('research-market-label',futures?'Binance Demo 永續 · 公開資料':'Binance Spot · 公開資料');
  text('exposure-label',futures?'保證金使用':'曝險使用');text('exposure-limit-label',futures?'總保證金上限':'總曝險上限');text('stake-label',futures?'單筆保證金上限':'單筆投入上限');
  $('futures-limits').hidden=!futures;text('notional-limit','最高 '+(data?.policy?.maxLeverage??3)+'× · 單筆 '+(data?.policy?.maxNotionalUsdt??150)+' / 合計 '+(data?.policy?.maxTotalNotionalUsdt??150)+' USDT');
  document.body.classList.toggle('is-preview',preview);document.body.classList.toggle('is-readonly',tradingDisabled===true);$('refresh').disabled=loading;text('refresh',loading?'…':'↻');$('preview').setAttribute('aria-pressed',String(preview));text('preview',preview?'離開展示 ↗':'開啟展示 ↗');
  text('source-label',tradingDisabled?'READ-ONLY / LOCAL LOCK':preview?'EXHIBITION / SAMPLE DATA':futures?'DEMO FUTURES / ISOLATED / MAX '+(data?.policy?.maxLeverage??'—')+'×':mode==='demo'?'BINANCE DEMO / VIRTUAL':'DRY-RUN / LOCAL');
- const strategyNote=data?.strategy?.decisionEngine==='rules'?(data.strategy.rulesReady?'新版突破策略已載入':'新版突破策略等待引擎載入')+' · '+
+ const strategyNote=data?.strategy?.decisionEngine==='rules'?(data.strategy.rulesReady?(kevFlow?'Kev 訂單流策略已載入':'策略引擎已載入'):'策略等待引擎載入')+' · '+
   (entryStateLabels[data.operations?.entryState]??(data.stopped?'進場已暫停':'排程狀態待確認'))+' · 每 30 秒更新':'唯讀監看 · 每 30 秒更新';
  text('notice',tradingDisabled?'本機已停用交易：此 Dashboard 僅提供唯讀研究與展示，所有新進場請求都會被安全鎖拒絕。':preview?'展示中的行情、績效與提案皆為範例。':error??(data?.engineError?'帳戶尚未連線或驗證未通過；公開行情可獨立查看。':data?strategyNote:'正在讀取工作區…'));
  document.querySelector('.account-band .summary-item > span').firstChild.nodeValue=(preview?'示例資產':'策略資產')+' ';text('balance',number(data?.account?.total));text('balance-note',preview?'示例帳戶 · 非實際資金':data?.account?'Demo 帳戶總值 '+number(data.account.accountTotal)+' USDT':'等待引擎連線');
@@ -366,7 +385,10 @@ function renderConnection(){
  const result=tradingDisabled?'本機唯讀模式已啟用。此頁不會啟動引擎、不會執行週期，也不會送出新進場訂單。':preview?'目前為展示模式。檢查連線會切換到所選環境，讀取本地引擎。':error??(loading?'正在檢查所選環境…':data?.account?(data.historyError?'帳戶與持倉已連上；交易歷史本次讀取失敗，請稍後重試。':'已驗證引擎身分，帳戶、持倉與交易紀錄已讀取。'):mode!=='dry-run'&&data?.setup?.configured&&!data?.setup?.credentialsPresent?'工作區已建立。請先在本機設定 Demo 金鑰，再啟動 Freqtrade。':data?.setup?.configured?'工作區設定已存在。請啟動上方對應的 Freqtrade 指令，再檢查一次。':'請先在專案目錄執行工作區設定，再啟動工作區。');
  text('connection-result',result);
  for(const dot of document.querySelectorAll('.status-dot'))dot.style.background=!preview&&data?.account?'#63a18d':'#b6bfcc';
- text('flow-market','Demo 成交與前五檔深度');text('flow-proposal','鏈上背景與模型，獨立記錄');text('flow-engine','Freqtrade 下單與持倉保護');
+ const kevFlow=data?.strategy?.entryPolicyVersion==='kev-order-flow-v1';
+ text('flow-market','Demo 成交與前五檔深度');text('flow-proposal',kevFlow?'Kev 選交易對、方向或 HOLD':'鏈上背景與模型，獨立記錄');text('flow-engine','Freqtrade 下單與持倉保護');
+ document.querySelector('.flow-details p').textContent=kevFlow?'Kev 使用即時訂單流決策；成本、風控與原生保護檢查後才下單。':'交易依目前策略與風控執行；其他觀察獨立記錄。';
+ $('flow-proposal').previousElementSibling.textContent=kevFlow?'進場決策':'觀察來源（不控制進場）';
  const list=$('activity-list');list.replaceChildren();
  for(const d of (data?.decisions??[]).slice(0,5)){const row=element('div','activity-item');row.append(element('time','',clock(d.at)),element('strong','',String(d.action).toUpperCase()),element('span','',d.pair+' · '+d.reason));row.title=d.reason;list.append(row);}
  if(!data?.decisions?.length)list.append(element('p','empty','還沒有研究紀錄，完成一次研究週期後會顯示在這裡。'));
@@ -383,17 +405,18 @@ function svgSurface(id,width,height){
 }
 function drawAnalytics(){
  const candles=store.state.market?.candles;
+ const kevFlow=store.state.data?.strategy?.entryPolicyVersion==='kev-order-flow-v1';
  const flow=svgSurface('flow-chart',320,360),fa=flow.add;
  const flowDefs=fa('defs',{}),marker=fa('marker',{id:'demo-flow-arrow',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:5,markerHeight:5,orient:'auto'},undefined,flowDefs);
  fa('path',{d:'M 0 0 L 10 5 L 0 10 Z',fill:'#527d72'},undefined,marker);
  const box=(x,y,w,label,fill='#f0f7f4')=>{fa('rect',{x,y,width:w,height:34,rx:7,fill,stroke:'#cfded8'});fa('text',{x:x+w/2,y:y+21,'text-anchor':'middle','font-size':12,fill:'#284d43'},label);};
  const arrow=(d,dashed=false)=>fa('path',{d,fill:'none',stroke:'#527d72','stroke-width':1.5,...(dashed?{'stroke-dasharray':'4 4'}:{}),'marker-end':'url(#demo-flow-arrow)'});
- ['訂單流採樣','方向判斷','成本與風控','Demo 下單','持倉保護與退出','實際扣費損益'].forEach((label,i)=>{box(12,15+i*51,145,label);if(i<5)arrow('M 84 '+(49+i*51)+' L 84 '+(66+i*51));});
+ ['訂單流採樣',kevFlow?'Kev 選幣與方向':'方向判斷','成本與風控','Demo 下單','持倉保護與退出','實際扣費損益'].forEach((label,i)=>{box(12,15+i*51,145,label);if(i<5)arrow('M 84 '+(49+i*51)+' L 84 '+(66+i*51));});
  box(181,66,127,'鏈上資金背景','#f5f3fa');box(181,168,127,'模型獨立觀察','#f5f3fa');box(181,270,127,'記錄與成效比較','#f5f3fa');
  arrow('M 244 100 L 244 140 L 314 140 L 314 255 L 280 255 L 280 261',true);arrow('M 244 202 L 244 261',true);arrow('M 157 287 L 179 287',true);
  fa('text',{x:243,y:241,'text-anchor':'middle','font-size':10,fill:'#766482'},'不批准／阻擋進場');
  fa('text',{x:160,y:332,'text-anchor':'middle','font-size':10,fill:'#687b74'},'未通過檢查 → 記錄原因 → 下一輪繼續');
- flow.target.setAttribute('aria-label','現行 Demo 流程：訂單流採樣、方向判斷、成本與風控、Demo 下單、持倉保護與退出、實際扣費損益。鏈上資金與模型獨立觀察，只進入記錄與成效比較，不批准或阻擋進場。');
+ flow.target.setAttribute('aria-label',kevFlow?'Kev 訂單流流程：即時訂單流、Kev 選交易對與方向、成本與風控、Demo 下單、原生保護退出、實際扣費損益。':'現行 Demo 流程：訂單流採樣、方向判斷、成本與風控、Demo 下單、持倉保護與退出、實際扣費損益。鏈上資金與模型獨立觀察，只進入記錄與成效比較，不批准或阻擋進場。');
  if(!candles?.length){for(const id of ['landscape','dimensions-chart'])$(id).replaceChildren(element('span','empty','載入行情後顯示'));for(const id of ['range-change','range-amplitude','range-volume'])text(id,'—');return;}
  const closes=candles.map(c=>Number(c.close)),lo=Math.min(...candles.map(c=>Number(c.low))),hi=Math.max(...candles.map(c=>Number(c.high))),range=hi-lo||1;
  const change=(closes.at(-1)/Number(candles[0].open)-1)*100;text('range-change',(change>0?'+':'')+number(change)+'%');$('range-change').className=change>=0?'positive':'negative';text('range-amplitude',number((hi-lo)/lo*100)+'%');text('range-volume',number(candles.reduce((sum,c)=>sum+Number(c.volume),0)/candles.length));

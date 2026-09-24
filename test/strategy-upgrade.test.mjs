@@ -75,15 +75,16 @@ async function freshModelRecheckFixture({mode='demo',atrCost=false}={}){
  return {snapshot,proposal,policy,client,guards,facts,evidence,market,quote,counts};
 }
 
-test('flow cycle never waits for a model and stale flow yields HOLD without a submission',async t=>{
+test('AI entry remains eligible when sampled flow is unavailable',async t=>{
  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-09-14T09:30:05Z')});
  const local=await mkdtemp(join(tmpdir(),'flow-cycle-')),f=await freshModelRecheckFixture();
  f.snapshot.markets[0].orderFlow=null;
  const result=await runCycle({local,policy:f.policy,client:f.client,collectFn:async()=>f.snapshot,costsFn:async()=>f.facts,
-  modelEvidenceFn:async()=>{throw Error('MODEL_MUST_NOT_BE_CALLED');},executeFn:args=>execute({...args,...f.guards})});
- assert.equal(result.proposal.action,'hold');assert.equal(f.counts.sends,0);
+  kevConfigFn:async()=>({enabled:false,marketData:'kronos'}),
+  modelEvidenceFn:async()=>f.evidence,executeFn:async()=>({status:'hold'})});
+ assert.equal(result.proposal.action,'buy');assert.equal(f.counts.sends,0);
  const model=await readJson(join(local,'runs',f.snapshot.id+'.model-decision.json'));
- assert.equal(model.usedForEntryDecision,false);assert.equal(model.status,'observation_only');
+ assert.equal(model.status,'ok');assert.equal(model.modelFingerprint,f.evidence.modelFingerprint);
  assert.equal((await readJson(join(local,'health.json'))).consecutiveFailures,0);
 });
 

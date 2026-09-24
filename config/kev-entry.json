@@ -1,0 +1,13 @@
+{
+  "version": "kev-codex-entry-v1",
+  "baseUrl": "http://127.0.0.1:8009",
+  "model": "kev-codex",
+  "expectedModel": "gpt-6-luna",
+  "timeoutMs": 15000,
+  "executionReserveMs": 10000,
+  "approvalTtlMs": 60000,
+  "maxCandidates": 3,
+  "decisionMode": "autonomous",
+  "marketData": "order-flow",
+  "decisionStyle": "aggressive"
+}

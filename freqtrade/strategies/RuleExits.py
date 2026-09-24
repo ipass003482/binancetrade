@@ -11,6 +11,7 @@ from freqtrade.strategy import stoploss_from_absolute
 
 RULE_ENGINE_VERSION = 'demo-rule-exits-v12'
 ENTRY_RULE_VERSION = 'kronos-direction-v12'
+KEV_RULE_VERSION = 'kev-order-flow-v1'
 BREAKEVEN_RULE_VERSIONS = ('atr15m-forward-v7', 'atr15m-forward-v8', 'atr15m-forward-v9')
 TRAILING_RULE_VERSIONS = ('atr15m-forward-v10', 'kronos-forward-v11', ENTRY_RULE_VERSION)
 TRAILING_POLICY = {'version': 'net-profit-trail-v1', 'triggerNetUsdt': .5, 'givebackNetUsdt': .25, 'riskMultiple': .5}
@@ -24,6 +25,9 @@ PROBE_RULE_VERSION = 'demo-execution-probe-v1'
 LEGACY_RULE_VERSIONS = ('confirmed-breakout-atr-v1', 'buffered-breakout-atr-v2',
                         'buffered-breakout-atr-v3', 'atr15m-risk-v4', 'atr15m-forward-v5')
 TIMED_RULE_VERSIONS = ('buffered-breakout-atr-v3', 'atr15m-risk-v4', 'atr15m-forward-v5', FIXED_ATR_RULE_VERSION, *PROTECTED_RULE_VERSIONS)
+# Keep the historical ATR profile groups stable; Kev has a seconds-only plan.
+_ALL_TRAILING_VERSIONS = (*TRAILING_RULE_VERSIONS, KEV_RULE_VERSION)
+_ALL_PROTECTED_VERSIONS = (*PROTECTED_RULE_VERSIONS, KEV_RULE_VERSION)
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from demo_model_guard import authorize_entry, clear_entry_permit, record_callback_rejection
@@ -58,7 +62,7 @@ def valid_risk_budget(plan):
 
 def valid_plan(value, pair, is_short, tag):
     # Existing positions keep their original, persisted numeric exit plan.
-    if not isinstance(value, dict) or value.get('ruleVersion') not in (*LEGACY_RULE_VERSIONS, FIXED_ATR_RULE_VERSION, *PROTECTED_RULE_VERSIONS, PROBE_RULE_VERSION):
+    if not isinstance(value, dict) or value.get('ruleVersion') not in (*LEGACY_RULE_VERSIONS, FIXED_ATR_RULE_VERSION, *_ALL_PROTECTED_VERSIONS, PROBE_RULE_VERSION):
         return None
     if not isinstance(tag, str) or not re.fullmatch(r'codex-[0-9a-f]{32}', tag):
         return None
@@ -69,13 +73,13 @@ def valid_plan(value, pair, is_short, tag):
         if not finite_number(n) or n <= 0:
             return None
     version = value['ruleVersion']
-    if version in PROTECTED_RULE_VERSIONS:
+    if version in _ALL_PROTECTED_VERSIONS:
         protection = value.get('profitProtection')
-        expected = TRAILING_POLICY if version in TRAILING_RULE_VERSIONS else BREAKEVEN_POLICY
+        expected = TRAILING_POLICY if version in _ALL_TRAILING_VERSIONS else BREAKEVEN_POLICY
         if (not isinstance(protection, dict) or protection != expected
                 or not finite_number(protection.get('triggerNetUsdt'))
                 or not finite_number(protection.get('riskMultiple'))
-                or (version in TRAILING_RULE_VERSIONS and not finite_number(protection.get('givebackNetUsdt')))
+                or (version in _ALL_TRAILING_VERSIONS and not finite_number(protection.get('givebackNetUsdt')))
                 or not valid_risk_budget(value)):
             return None
     if version == PROBE_RULE_VERSION:
@@ -87,6 +91,16 @@ def valid_plan(value, pair, is_short, tag):
             or value['stopFraction'] != .005 or value['targetFraction'] != .005
             or not finite_number(value.get('maxEntryNotionalUsdt'))
             or not 0 < value['maxEntryNotionalUsdt'] <= 25):
+            return None
+        return value
+    if version == KEV_RULE_VERSION:
+        if (value.get('purpose') != 'strategy' or value.get('timeframe') != 'order-flow'
+                or value.get('entryPolicyVersion') != KEV_RULE_VERSION
+                or value.get('entrySignalEngine') != 'kev_order_flow'
+                or any(key in value for key in ('atrTimeframe', 'candleBoundary', 'model', 'adaptiveParameters'))
+                or value['stopFraction'] != .005 or value['targetFraction'] != .015
+                or type(value.get('maxHoldingSeconds')) is not int or value['maxHoldingSeconds'] != 900
+                or type(value.get('maxHoldingBars')) is not int or value['maxHoldingBars'] != 0):
             return None
         return value
     timed = version in TIMED_RULE_VERSIONS
@@ -123,7 +137,7 @@ class RuleExits:
 
     def custom_roi(self, pair, trade, current_time, trade_duration, entry_tag, side, **kwargs):
         plan = self._rule_plan(trade)
-        if plan and plan['ruleVersion'] in (FIXED_ATR_RULE_VERSION, *PROTECTED_RULE_VERSIONS, PROBE_RULE_VERSION):
+        if plan and plan['ruleVersion'] in (FIXED_ATR_RULE_VERSION, *_ALL_PROTECTED_VERSIONS, PROBE_RULE_VERSION):
             return None
         # Preserve the pre-upgrade ROI schedule for already-open legacy trades.
         return .005 if trade_duration >= 360 else .015 if trade_duration >= 120 else .03
@@ -173,7 +187,7 @@ class RuleExits:
             return False
         plan = self._entry_plan(pair, side == 'short', entry_tag)
         plan = valid_plan(plan, pair, side == 'short', entry_tag)
-        if not plan or plan['ruleVersion'] not in (ENTRY_RULE_VERSION, PROBE_RULE_VERSION):
+        if not plan or plan['ruleVersion'] not in (ENTRY_RULE_VERSION, KEV_RULE_VERSION, PROBE_RULE_VERSION):
             return False
         if plan['ruleVersion'] == PROBE_RULE_VERSION and pair != ('ETH/USDT' if mode == 'spot' else 'ETH/USDT:USDT'):
             return False
@@ -321,7 +335,7 @@ class RuleExits:
         if state is None:
             return None
         plan = self._rule_plan(trade)
-        if (not isinstance(state, dict) or not plan or plan['ruleVersion'] not in TRAILING_RULE_VERSIONS
+        if (not isinstance(state, dict) or not plan or plan['ruleVersion'] not in _ALL_TRAILING_VERSIONS
                 or state.get('version') != TRAILING_POLICY['version']
                 or state.get('ruleVersion') != plan['ruleVersion'] or state.get('tag') != trade.enter_tag
                 or state.get('pair') != trade.pair or state.get('isShort') is not trade.is_short
@@ -404,12 +418,12 @@ class RuleExits:
             legacy = True
         else:
             stop = trade.open_rate * (1 + (plan['stopFraction'] if trade.is_short else -plan['stopFraction']))
-            if plan['ruleVersion'] in TRAILING_RULE_VERSIONS and finite_number(trade.stop_loss) and trade.stop_loss > 0:
+            if plan['ruleVersion'] in _ALL_TRAILING_VERSIONS and finite_number(trade.stop_loss) and trade.stop_loss > 0:
                 stop = (min if trade.is_short else max)(stop, trade.stop_loss)
             legacy = plan['ruleVersion'] in LEGACY_RULE_VERSIONS
-            if plan['ruleVersion'] in PROTECTED_RULE_VERSIONS:
+            if plan['ruleVersion'] in _ALL_PROTECTED_VERSIONS:
                 try:
-                    breakeven = (self._trailing_stop if plan['ruleVersion'] in TRAILING_RULE_VERSIONS else self._breakeven_stop)(trade, current_time, current_rate)
+                    breakeven = (self._trailing_stop if plan['ruleVersion'] in _ALL_TRAILING_VERSIONS else self._breakeven_stop)(trade, current_time, current_rate)
                 except ValueError:
                     # None here tells Freqtrade to retain its existing stop,
                     # even in after_fill which otherwise permits loosening.
@@ -419,7 +433,7 @@ class RuleExits:
                 # absolute->ratio->absolute path can round a short down another
                 # tick as quotes change, unintentionally ratcheting an ATR stop.
                 # None also preserves it after_fill; it never resets/widens it.
-                if (plan['ruleVersion'] in TRAILING_RULE_VERSIONS and breakeven is None
+                if (plan['ruleVersion'] in _ALL_TRAILING_VERSIONS and breakeven is None
                         and finite_number(trade.stop_loss) and trade.stop_loss > 0
                         and stop == trade.stop_loss):
                     return None
@@ -484,7 +498,7 @@ class RuleExits:
         plan = self._rule_plan(trade)
         if not plan:
             return None
-        if plan['ruleVersion'] in TRAILING_RULE_VERSIONS:
+        if plan['ruleVersion'] in _ALL_TRAILING_VERSIONS:
             try:
                 state = self._trailing_state(trade)
                 if state and (current_rate >= state['stopPrice'] if trade.is_short else current_rate <= state['stopPrice']):
@@ -503,7 +517,7 @@ class RuleExits:
             return 'rules_stop'
         if change >= plan['targetFraction']:
             return 'rules_target'
-        holding_seconds = plan['maxHoldingSeconds'] if plan['ruleVersion'] in (*TIMED_RULE_VERSIONS, PROBE_RULE_VERSION) else plan['maxHoldingBars'] * 900
+        holding_seconds = plan['maxHoldingSeconds'] if plan['ruleVersion'] in (*TIMED_RULE_VERSIONS, KEV_RULE_VERSION, PROBE_RULE_VERSION) else plan['maxHoldingBars'] * 900
         if (current_time - trade.open_date_utc).total_seconds() >= holding_seconds:
             return 'rules_time'
         return self._flow_invalidation_exit(trade, plan, current_time)

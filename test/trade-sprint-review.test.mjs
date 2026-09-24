@@ -180,6 +180,54 @@ function nativeTrade(n,options={}){
  for(const order of t.orders)order.order_filled_timestamp+=shift;
  return t;
 }
+function kevPending(t,mode='demo'){
+ const snapshotId=snapshot(t.trade_id),action=mode==='demo'?'buy':t.is_short?'open-short':'open-long',completedAt=new Date(t.open_timestamp-1500).toISOString();
+ return {ruleVersion:'kev-order-flow-v1',model:null,entryPolicyVersion:'kev-order-flow-v1',entrySignalEngine:'kev_order_flow',
+  riskPolicy:{version:'native-stop-risk-v1',mode,stopLimitRatio:mode==='demo'?'0.995':null,reserveFraction:mode==='demo'?'0.005':'0'},
+  entryEvidence:{version:'kev-order-flow-evidence-v1',snapshotId,usedForEntryDecision:true,proofSha256:'d'.repeat(64),
+   kevReview:{version:'kev-codex-entry-v1',provider:'codex-cli',decisionMode:'autonomous',model:'test-model',requestId:'request-1',snapshotId,
+    snapshotSha256:'e'.repeat(64),configSha256:'f'.repeat(64),proofSha256:'1'.repeat(64),completedAt,
+    expiresAt:new Date(t.open_timestamp+30000).toISOString(),probabilitiesCalibrated:false,
+    decision:{pair:t.pair,action,approved:true,choice:'select'},selection:{choice:'q0'}}}};
+}
+function kevAmendment(g,effectiveAt=new Date(base+90000).toISOString()){
+ return {schemaVersion:1,goalId:g.id,goalSha256:createHash('sha256').update(JSON.stringify(g)).digest('hex'),
+  entryPolicyVersion:'kev-order-flow-v1',ruleVersion:'kev-order-flow-v1',effectiveAt};
+}
+test('prospective Kev amendment preserves old fills, start, deadline and losses while separating the new order-flow cohort',()=>{
+ const old=trade(1,{net:'-.7'}),fresh=trade(2,{net:'.2'}),g=goal(),amendment=kevAmendment(g),
+  journals={demo:[...journal(old),...journal(fresh,{pending:kevPending(fresh)})],'demo-futures':[]};
+ const before=JSON.stringify({g,amendment,journals}),r=review([old,fresh],[],{goal:g,journals,amendment});
+ assert.equal(r.evidenceComplete,true);assert.equal(r.totalEntries,2);assert.equal(r.modes.demo.netRealizedUsdt,'-0.5');
+ assert.equal(r.startedAt,g.startedAt);assert.equal(r.deadline,g.deadline);assert.equal(JSON.stringify({g,amendment,journals}),before);
+ assert.deepEqual(r.modes.demo.entryPolicyCohorts.map(c=>[c.entryPolicyVersion,c.entries,c.netRealizedUsdt]),
+  [['forecast-net-edge-v1',1,'-0.7'],['kev-order-flow-v1',1,'0.2']]);
+ assert.equal(r.modes.demo.trades[1].modelFingerprint,null);assert.equal(r.modes.demo.trades[1].entryRoute,'kev-order-flow');
+ assert.equal(review([old,fresh],[],{goal:g,journals}).totalEntries,1);
+ const lateAmendment=kevAmendment(g,new Date(fresh.open_timestamp+1).toISOString());
+ assert.equal(review([old,fresh],[],{goal:g,journals,amendment:lateAmendment}).totalEntries,1);
+ fresh.orders[0].order_filled_timestamp=Date.parse(g.deadline);
+ assert.equal(review([old,fresh],[],{goal:g,journals,amendment}).totalEntries,1);
+});
+test('Kev attribution requires immutable matching autonomous approval before submission, exact source and real fills',()=>{
+ for(const mutate of [p=>p.entryEvidence.kevReview=null,p=>p.entryEvidence.proofSha256=null,
+  p=>p.entryEvidence.kevReview.configSha256=null,p=>p.entryEvidence.kevReview.decision.approved=false,
+  p=>p.entryEvidence.kevReview.decision.action='open-short',p=>p.entryEvidence.kevReview.decision.pair='ETH/USDT',
+  p=>p.entryEvidence.kevReview.snapshotId=snapshot(3),p=>p.entryEvidence.kevReview.selection.choice='hold',
+  p=>p.entryEvidence.kevReview.completedAt=new Date(base+120000).toISOString(),
+  p=>p.entryEvidence.kevReview.expiresAt=new Date(base+119000).toISOString(),p=>p.model={modelFingerprint:fingerprint},
+  p=>p.entrySignalEngine='sampled_order_flow',p=>p.riskPolicy=null]){
+  const t=trade(2),g=goal(),p=kevPending(t);mutate(p);
+  const r=review([t],[],{goal:g,amendment:kevAmendment(g),journals:{demo:journal(t,{pending:p}),'demo-futures':[]}});
+  assert.equal(r.modes.demo.entries,0);assert.equal(r.evidenceComplete,false);
+ }
+ const t=trade(2),g=goal(),rows=journal(t,{pending:kevPending(t)});
+ rows[1].entryEvidence={...rows[0].entryEvidence,proofSha256:'2'.repeat(64)};
+ assert.equal(review([t],[],{goal:g,amendment:kevAmendment(g),journals:{demo:rows,'demo-futures':[]}}).evidenceComplete,false);
+ for(const change of [{ruleVersion:'kronos-direction-v12'},{goalSha256:'0'.repeat(64)},
+  {effectiveAt:new Date(base-1).toISOString()},{effectiveAt:g.deadline}])
+  assert.throws(()=>review([],[],{goal:g,amendment:{...kevAmendment(g),...change}}),/AMENDMENT_INVALID/);
+});
 function nativeReview(spot=[],futures=[],options={}){
  const at=options.observedAt??nativeObserved;
  const histories=Object.fromEntries([['demo',spot],['demo-futures',futures]].map(([mode,trades])=>[mode,{source:'freqtrade-demo',historyComplete:true,observedAt:at,trades}]));

@@ -40,3 +40,64 @@ export function attachCosts(snapshot,facts,config){
  for(const m of snapshot.markets){m.entryCost=entryCost(facts,m,snapshot.mode,config);snapshot.evidence.push({id:'cost:'+m.pair,pair:m.pair,status:m.entryCost.status,data:m.entryCost});}
  return snapshot;
 }
+
+// Public, normalized cost scenarios for the entry reviewer. These use an
+// executable ask->bid (long) or bid->ask (short) price basis: the spread is
+// already in the quotes and MUST NOT be charged a second time. They describe
+// fees and hypothetical exits, never a forecast, win rate or account balance.
+const CostDecimal=Decimal.clone({precision:40});
+export function executableCostEconomics({mode,action,market,stopFraction,targetFraction}){
+ const invalid=()=>{throw Error('KEV_COST_ECONOMICS_INVALID');};
+ const number=value=>{
+  if(!['string','number'].includes(typeof value)||String(value).length>100)invalid();
+  let result;try{result=new CostDecimal(value);}catch{invalid();}
+  if(!result.isFinite()||Math.abs(result.e)>50)invalid();return result;
+ };
+ const long=action!=='open-short',cost=market?.entryCost;
+ if(!['demo','demo-futures'].includes(mode)||!(mode==='demo'?['buy']:['open-long','open-short']).includes(action)||cost?.status!=='ok')invalid();
+ const bid=number(market.bid),ask=number(market.ask),buy=number(cost.buyRate),sell=number(cost.sellRate),
+  slip=number(cost.slippageBpsPerSide).div(10000),fund=number(cost.fundingReserveBps).div(10000),
+  spread=number(cost.spreadBps),fees=number(cost.roundTripFeeBps),total=number(cost.estimatedRoundTripCostBps),
+  required=number(cost.requiredPriceSpaceBps),stop=number(stopFraction),target=number(targetFraction);
+ if(bid.lte(0)||ask.lt(bid)||buy.lt(0)||sell.lt(0)||buy.gt('.1')||sell.gt('.1')||
+  slip.lt(0)||slip.gt('.01')||fund.lt(0)||fund.gt(1)||(mode==='demo'&&!fund.isZero())||spread.lt(0)||spread.gt(10000)||
+  total.lt(0)||required.lt(total)||required.gt(10000)||stop.lte(0)||stop.gt('.02')||target.lte(0)||target.gt(1)||
+  fees.minus(buy.plus(sell).mul(10000)).abs().gt('1e-8')||
+  total.minus(fees.plus(spread).plus(slip.mul(20000)).plus(fund.mul(10000))).abs().gt('1e-8'))invalid();
+ const quoteSpread=ask.minus(bid).div(bid).mul(10000);
+ if(spread.minus(quoteSpread).abs().gt('1e-8')||number(market.spreadBps).minus(quoteSpread).abs().gt('1e-8'))invalid();
+ const entryQuote=long?ask:bid,currentExitQuote=long?bid:ask,sign=long?1:-1,
+  entryFill=entryQuote.mul(new CostDecimal(1).plus(slip.mul(sign))),
+  exitFactor=new CostDecimal(1).minus(slip.mul(sign)),entryFee=long?buy:sell,exitFee=long?sell:buy,
+  buffer=required.minus(total).div(10000),notional=new CostDecimal(100),amount=notional.div(entryFill);
+ const netAt=exitQuote=>{
+  const exitFill=exitQuote.mul(exitFactor);
+  // Spot's undiscounted BUY fee can be taken from received base currency.
+  // Budget that quantity reduction instead of charging a quote fee as well.
+  if(mode==='demo')return amount.mul(new CostDecimal(1).minus(buy)).mul(exitFill)
+   .mul(new CostDecimal(1).minus(sell)).minus(notional);
+  return amount.mul(exitFill.minus(entryFill)).mul(sign)
+   .minus(notional.mul(entryFee)).minus(amount.mul(exitFill).mul(exitFee)).minus(notional.mul(fund));
+ };
+ const exitForNet=netFraction=>mode==='demo'
+  ?entryFill.mul(new CostDecimal(1).plus(netFraction)).div(new CostDecimal(1).minus(buy).mul(exitFactor).mul(new CostDecimal(1).minus(sell)))
+  :long?entryFill.mul(new CostDecimal(1).plus(entryFee).plus(fund).plus(netFraction)).div(exitFactor.mul(new CostDecimal(1).minus(exitFee)))
+   :entryFill.mul(new CostDecimal(1).minus(entryFee).minus(fund).minus(netFraction)).div(exitFactor.mul(new CostDecimal(1).plus(exitFee)));
+ const breakEven=exitForNet(new CostDecimal(0)),withBuffer=exitForNet(buffer),
+  targetQuote=entryFill.mul(new CostDecimal(1).plus(target.mul(sign))),
+  stopQuote=entryFill.mul(new CostDecimal(1).minus(stop.mul(sign)));
+ if(breakEven.lte(0)||withBuffer.lte(0)||targetQuote.lte(0)||stopQuote.lte(0))invalid();
+ const price=v=>v.toSignificantDigits(20).toFixed(),money=v=>v.toFixed(8);
+ return {version:'kev-executable-cost-v1',basis:'100_USDT_entry_notional; executable exit quotes, spread included once',
+  feeAssumption:mode==='demo'?'undiscounted BUY fee in received base; SELL fee in quote; no BNB discount':'quote fees on each leg plus reserved funding',
+  entryQuotePrice:price(entryQuote),modeledEntryFillPrice:price(entryFill),currentExitQuotePrice:price(currentExitQuote),
+  entryFeeRate:entryFee.toFixed(),exitFeeRate:exitFee.toFixed(),slippageBpsPerSide:slip.mul(10000).toFixed(),
+  fundingReserveBps:fund.mul(10000).toFixed(),netBufferBps:buffer.mul(10000).toFixed(),
+  breakEvenExitQuotePrice:price(breakEven),exitQuoteForNetBuffer:price(withBuffer),
+  requiredFavorableExitQuoteMoveBps:withBuffer.div(currentExitQuote).minus(1).mul(sign).mul(10000).toFixed(8),
+  unchangedQuotesNetUsdtPer100:money(netAt(currentExitQuote)),
+  targetExitQuotePrice:price(targetQuote),targetNetUsdtPer100:money(netAt(targetQuote)),
+  stopExitQuotePrice:price(stopQuote),stopNetUsdtPer100:money(netAt(stopQuote)),
+  stopScenario:'planned stop trigger quote plus modeled exit slippage; excludes additional stop-limit stress reserve used by native sizing',
+  forecast:false};
+}

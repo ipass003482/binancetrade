@@ -11,7 +11,7 @@
   "maxExposureUsdt": "50",
   "maxOpenTrades": 2,
   "demoSpot": {
-    "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "SUI/USDT", "UNI/USDT", "NEAR/USDT", "ADA/USDT"],
+    "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "SUI/USDT", "UNI/USDT", "NEAR/USDT", "ADA/USDT", "NVDAB/USDT", "AMZNB/USDT"],
     "maxStakeUsdt": "300",
     "maxExposureUsdt": "900",
     "maxOpenTrades": 3,

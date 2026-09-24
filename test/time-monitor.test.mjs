@@ -8,6 +8,21 @@ import { timeMonitor } from '../src/time-monitor.mjs';
 import { writeJson } from '../src/io.mjs';
 import { timingView } from '../ui/timing.mjs';
 const B=Date.parse('2026-09-10T00:00:00Z'),NOW=B+5000;
+test('Kev monitoring uses minute and fresh depth identities without a candle countdown',async()=>{
+ const local=await mkdtemp(join(tmpdir(),'kev-time-monitor-')),at=B+80000;
+ await writeJson(join(local,'continuous.json'),{entryPolicyVersion:'kev-order-flow-v1'});
+ await writeJson(join(local,'watch.lock'),{pid:10});await writeJson(join(local,'watch-heartbeat.json'),{pid:10,at:new Date(at).toISOString()});
+ const r=await timeMonitor(local,'demo',{now:()=>at,state:()=> 'alive',getClock:async()=>clockFixture(at,'demo')});
+ assert.equal(r.timeframe,'order-flow');assert.equal(r.candleMs,null);assert.equal(r.nextCandleCloseAt,null);
+ assert.equal(r.entryPolicyVersion,'kev-order-flow-v1');assert.equal(r.decisionIntervalMs,60000);
+ const args={data:{timing:r},market:{timeframe:'order-flow',orderFlow:{books:[{at:at-1000}]}}};
+ const view=timingView(args);assert.equal(view.tone,'ok');assert.match(view.status,/Kev 訂單流決策/);
+ assert.equal(view.nextCandle,'不使用 K 線');assert.match(view.delay,/訂單簿 1 秒前/);
+ assert.match(timingView({...args,elapsedMs:31000}).delay,/訂單簿已過期/);
+ assert.equal(timingView({...args,elapsedMs:46000}).tone,'warning');
+ const future=await timeMonitor(local,'demo-futures',{now:()=>B+10000,state:()=> 'alive',getClock:async()=>clockFixture(B+10000,'demo-futures')});
+ assert.equal(future.nextCandleCloseAt,null);
+});
 test('minute decision countdown remains separate from next5m candle',async()=>{
  const local=await mkdtemp(join(tmpdir(),'minute-time-monitor-')),at=B+80000;
  await writeJson(join(local,'watch.lock'),{pid:10});await writeJson(join(local,'watch-heartbeat.json'),{pid:10,at:new Date(at).toISOString()});

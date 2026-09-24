@@ -29,6 +29,12 @@ test('high-frequency snapshot derives depth, taker-flow and short-horizon moment
  assert.ok(snapshot.markets[0].takerFlow.buyShare>0.5);
  assert.ok(snapshot.markets[0].microMomentum.return5mBps>0);
  assert.equal(snapshot.markets[0].cost.feeStatus,'unavailable');
+ assert.equal(snapshot.markets[0].cost.version,'quote-cost-scenario-v2');
+ assert.equal(snapshot.markets[0].cost.roundTripFeeBps,null);
+ assert.equal(snapshot.markets[0].cost.netCostBps,null);
+ assert.equal(snapshot.markets[0].cost.additionalSlippageBps,10);
+ assert.equal(snapshot.markets[0].cost.estimatedRoundTripCostBps,snapshot.markets[0].quote.spreadBps+10);
+ assert.equal(snapshot.markets[0].quote.observedAt,new Date(1700000000000).toISOString());
  assert.equal(snapshot.evidence.filter(e=>e.id.startsWith('cost:')).length,4);
 });
 
@@ -53,4 +59,33 @@ test('high-frequency cycle stays research-only and converts a sell with no posit
 
 test('high-frequency cycle refuses Demo execution modes',async()=>{
  await assert.rejects(runHighFrequencyCycle({policy:{mode:'demo'}}),/HIGH_FREQUENCY_RESEARCH_DRY_RUN_ONLY/);
+});
+
+test('quote timestamp is captured at book receipt rather than later snapshot completion',async()=>{
+ let time=1700000000000;
+ const snapshot=await collectHighFrequencySnapshot({pairs:['BTC/USDT'],fetchImpl:mockMarket,now:time,clock:()=>time+=1000,
+  costs:{slippageBpsPerSide:0,priceSpaceBufferBps:30}});
+ assert.equal(snapshot.markets[0].quote.observedAt,new Date(1700000001000).toISOString());
+ assert.equal(snapshot.completedAt,new Date(1700000002000).toISOString());
+ assert.equal(snapshot.markets[0].cost.additionalSlippageBps,0);
+ assert.equal(snapshot.markets[0].cost.feeStatus,'unavailable');
+});
+
+for(const quote of [{bidPrice:'-1',askPrice:'1'},{bidPrice:'2',askPrice:'1'},{bidPrice:null,askPrice:'1'},{bidPrice:true,askPrice:'2'}]){
+ test(`collector rejects invalid executable quote ${JSON.stringify(quote)}`,async()=>{
+  const fetchImpl=url=>new URL(url).pathname.endsWith('/bookTicker')
+   ?new Response(JSON.stringify({symbol:'BTCUSDT',...quote})):mockMarket(url);
+  const snapshot=await collectHighFrequencySnapshot({pairs:['BTC/USDT'],fetchImpl,now:1700000000000,costs:{slippageBpsPerSide:0,priceSpaceBufferBps:30}});
+  assert.equal(snapshot.markets.length,0);
+  assert.equal(snapshot.errors.length,1);
+ });
+}
+
+test('collector rejects missing or negative slippage inputs rather than treating them as free execution',async()=>{
+ for(const value of [null,-1,false,'']){
+  const snapshot=await collectHighFrequencySnapshot({pairs:['BTC/USDT'],fetchImpl:mockMarket,now:1700000000000,
+   costs:{slippageBpsPerSide:value,priceSpaceBufferBps:30}});
+  assert.equal(snapshot.markets.length,0);
+  assert.equal(snapshot.errors.length,1);
+ }
 });

@@ -87,7 +87,7 @@ function protectionCovers(trade,stop){
  * obtained for this execution. This function never queries or mutates a broker.
  * Historical acknowledgements alone are not proof of an active protective order.
  */
-export async function assertNativeProtection({mode,local,account,pair,now,
+export async function assertNativeProtection({mode,local,account,pair,now,entryPolicyVersion,
  maxAgeMs=NATIVE_PROTECTION_MAX_AGE_MS,pidState=pidStatus,getProcessAncestry=processAncestry}={}){
  if(!['demo','demo-futures'].includes(mode))fail('NATIVE_PROTECTION_DEMO_REQUIRED');
  if(typeof local!=='string'||!local||typeof pair!=='string'||!pair||(now!==undefined&&!Number.isFinite(now))
@@ -120,6 +120,7 @@ export async function assertNativeProtection({mode,local,account,pair,now,
    fail('NATIVE_PROTECTION_READINESS_INVALID');
  verifyLineage(lineage,owner,state.processId,mode,pidState);
  if(state.nativeEntryGuardVersion!==NATIVE_ENTRY_GUARD_VERSION)fail('NATIVE_MODEL_GUARD_RESTART_REQUIRED');
+ if(entryPolicyVersion==='kev-order-flow-v1'&&state.kevEntryGuardVersion!=='kev-native-entry-v1')fail('NATIVE_KEV_GUARD_RESTART_REQUIRED');
  if(state.stopPriceVersion!=='stable-unarmed-stop-v1')fail('NATIVE_STOP_PRICE_RESTART_REQUIRED');
  if(state.riskPolicyVersion!==DEMO_RISK_POLICY_VERSION)fail('NATIVE_RISK_POLICY_RESTART_REQUIRED');
  // Freqtrade show_config filters this nested option out of its RPC response.

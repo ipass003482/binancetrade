@@ -12,6 +12,53 @@ import { clockBoundary,clockDecisionBoundary,FLOW_DECISION_CADENCE_VERSION,FLOW_
 import { timeframeSpec,tradingTimeframe } from './timeframe.mjs';
 import {readOrderFlow} from './order-flow-collector.mjs';
 const PUBLIC='https://data-api.binance.vision';
+// Kev entry observations intentionally have no candle or technical-indicator
+// dependency. Native risk and execution still validate the Demo instrument,
+// quote, clock and the separately sampled raw order-flow proof.
+export async function marketOrderFlow(pair,{fetchImpl=fetch,mode='demo',clock,readOrderFlowFn=readOrderFlow}={}) {
+ if(!['demo','demo-futures'].includes(mode))throw new Error('FLOW_DEMO_ONLY');
+ const futures=isFutures(mode),base=futures?'https://demo-fapi.binance.com':'https://demo-api.binance.com';
+ const prefix=futures?'/fapi/v1':'/api/v3';
+ if(!(futures?/^[A-Z0-9]+\/USDT:USDT$/:/^[A-Z0-9]+\/USDT$/).test(pair))throw new Error('INVALID_MARKET_PAIR');
+ clock=clock??await readExchangeClock(mode,{fetchImpl});
+ const symbol=pair.split(':')[0].replace('/',''),query='?symbol='+symbol;
+ let quoteFetchedAt;
+ const [info,book,funding,orderFlow]=await Promise.all([
+  jsonFetch(base+prefix+'/exchangeInfo'+(futures?'':query),{fetchImpl}),
+  jsonFetch(base+prefix+'/ticker/bookTicker'+query,{fetchImpl}).then(value=>{quoteFetchedAt=new Date().toISOString();return value;}),
+  futures?jsonFetch(base+prefix+'/premiumIndex'+query,{fetchImpl}):null,
+  readOrderFlowFn(mode,pair)
+ ]);
+ const instrument=info.symbols?.find(s=>s.symbol===symbol);
+ if(!instrument||instrument.status!=='TRADING'||instrument.baseAsset+'/'+instrument.quoteAsset!==pair.split(':')[0]||
+  (futures?(instrument.contractType!=='PERPETUAL'||instrument.marginAsset!=='USDT'):instrument.isSpotTradingAllowed!==true))
+  throw new Error(futures?'NOT_A_VERIFIED_USDT_PERPETUAL':'NOT_A_VERIFIED_SPOT_PAIR');
+ if(book.symbol!==symbol)throw new Error('QUOTE_SYMBOL_MISMATCH');
+ const bid=new Decimal(book.bidPrice),ask=new Decimal(book.askPrice);
+ if(!bid.isFinite()||!ask.isFinite()||bid.lte(0)||ask.lt(bid))throw new Error('Invalid quote');
+ if(futures&&(funding.symbol!==symbol||typeof funding.lastFundingRate!=='string'||funding.lastFundingRate.trim()===''||
+  !Number.isFinite(Number(funding.lastFundingRate))||!Number.isFinite(Number(funding.markPrice))||!(Number(funding.markPrice)>0)))
+  throw new Error('INVALID_FUNDING_MARK');
+ return {pair,orderFlow,filters:instrument.filters,
+  ...(futures?{verifiedFutures:true,contractType:'PERPETUAL',marginAsset:'USDT',markPrice:funding.markPrice,
+   fundingRate:funding.lastFundingRate,nextFundingTime:funding.nextFundingTime}:{verifiedSpot:true}),
+  bid:bid.toFixed(),ask:ask.toFixed(),spreadBps:ask.minus(bid).div(bid).mul(10000).toNumber(),
+  source:base,mode,timeframe:'order-flow',clock,fetchedAt:quoteFetchedAt,quoteAsOf:null,
+  note:'Public REST quote has no exchange event timestamp; fetchedAt is retrieval time.'};
+}
+export async function collectOrderFlow(policy,{fetchImpl=fetch,readOrderFlowFn=readOrderFlow}={}) {
+ if(!['demo','demo-futures'].includes(policy.mode))throw new Error('FLOW_DEMO_ONLY');
+ const clock=await readExchangeClock(policy.mode,{fetchImpl}),createdAt=new Date().toISOString();
+ const snapshot={id:randomUUID(),entryPolicyVersion:'kev-order-flow-v1',timeframe:'order-flow',createdAt,clock,
+  decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,decisionIntervalMs:FLOW_DECISION_INTERVAL_MS,
+  decisionBoundary:clockDecisionBoundary(clock,policy.mode,Date.parse(createdAt)),mode:policy.mode,
+  markets:[],evidence:[],errors:[],researchCoverage:[]};
+ snapshot.markets=await Promise.all(policy.pairs.map(pair=>marketOrderFlow(pair,{fetchImpl,mode:policy.mode,clock,readOrderFlowFn})));
+ snapshot.evidence=snapshot.markets.map(m=>({id:(isFutures(policy.mode)?'futures:':'spot:')+m.pair,
+  status:'ok',source:m.source,fetchedAt:m.fetchedAt,data:m})).sort((a,b)=>a.id.localeCompare(b.id));
+ snapshot.completedAt=new Date().toISOString();
+ return snapshot;
+}
 export async function market(pair,{fetchImpl=fetch,mode='dry-run',clock,candleBoundary}={}) {
  if(!MODES.includes(mode))throw new Error('MARKET_MODE_REJECTED');
  const spec=timeframeSpec(tradingTimeframe(mode));

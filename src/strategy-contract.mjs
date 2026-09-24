@@ -1,49 +1,112 @@
-// One host-owned description shared by the executable Demo and research prompt.
-// Snapshot text cannot replace this contract. No model or order calls here.
-import {FLOW_ONLY_PARAMETERS as DEMO_PARAMETERS,DEMO_RULE_VERSION,DEMO_RISK_BUDGET_USDT} from './demo-rules.mjs';
-import {volumeMinimum,validateVolumeAssignment} from './volume-experiment.mjs';
-import {FLOW_ONLY_POLICY as MODEL_ENTRY_POLICY} from './order-flow.mjs';
+// Host-owned active AI contract; historical positions keep their entry-time plans.
+import {DEMO_PARAMETERS,DEMO_RULE_VERSION,DEMO_RISK_BUDGET_USDT} from './demo-rules.mjs';
+import {MODEL_ENTRY_POLICY} from './model-momentum.mjs';
 import {demoRiskPolicy} from './demo-risk.mjs';
 import {ADAPTIVE_FLOW_VERSION,ADAPTIVE_FLOW_BOUNDS} from './adaptive-parameters.mjs';
-import {FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS} from './entry-timing.mjs';
+import {FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS,AI_ENTRY_CADENCE_VERSION,AI_ENTRY_INTERVAL_MS,AI_ENTRY_WINDOW_MS} from './entry-timing.mjs';
+import {KEV_FLOW_POLICY,KEV_NATIVE_VERSION,KEV_FLOW_PARAMETERS} from './kev-flow.mjs';
 
 export function demoStrategyContract(policy,snapshot={}){
  if(!['demo','demo-futures'].includes(policy.mode))throw Error('DEMO_CONTRACT_MODE_REQUIRED');
- return {version:1,directionCapabilities:policy.mode==='demo'?{long:'buy',short:null,closeLong:'sell',closeShort:null,shortStatus:'unavailable_on_binance_spot_demo',shortReason:'SPOT_SHORT_REQUIRES_MARGIN'}:{long:'open-long',short:'open-short',closeLong:'close-long',closeShort:'close-short',shortStatus:'available_on_usdt_perpetual_demo'},executionQuality:policy.mode==='demo'?{version:'flow-confirmed-exit-v2',continuationVersion:'flow-price-continuation-v1',ranking:'Eligible spot pairs ranked by last minus first depth imbalance, then original planned net reward minus stressed risk. Ranking only, no extra eligibility gate.',flowExit:{version:'rolling-opposite-flow-v2',rule:'New spot positions only: three fresh rolling 60s opposite-flow samples spanning at least 20s, with new trade IDs and observations no more than 20s apart. Overlapping samples show persistence, not independent confirmation. Neutral/invalid/gaps reset confirmation; native stop/target/time/trail retain priority. Confirmed native exit is persisted until filled.'},rule:'The offered buying price must remain strictly above the first flow-book ask. Host rechecks executable quote; native checks its callback reference rate. Market fill price is not guaranteed.',status:'prospective hypothesis; not a proven win-rate increase'}:null,orderFlow:{version:'sampled-demo-flow-v1',sampling:'continuous 10-second Demo REST depth samples and 60-second aggregate-trade windows; not event OFI',entry:'flow alone selects direction; costs and risk remain mandatory',flowSupport:'at least 55% directional taker notional, same-side top-five depth in three samples, directional mid change of at least 0.25 bps, and absolute top-five depth imbalance no greater than 70%',continuation:'Before a new futures entry, the executable ask (long) or bid (short) must still be beyond the corresponding first sampled book level; a reverted quote invalidates that minute and waits for fresh flow.',degradation:'missing/stale/invalid flow prevents entry; no candle or model fallback',selection:policy.mode==='demo'?'eligible pairs by depth-imbalance change, then planned net reward minus stressed risk':'flow-supported eligible pairs first; then planned net reward minus stressed risk',lossCooldown:{version:'flow-loss-cooldown-v1',durationMs:600000,rule:'After a closed negative Demo fill, block only the same pair for 10 minutes before a fresh flow decision; this is a bounded re-entry guard, not a win-rate claim.'}},ruleVersion:DEMO_RULE_VERSION,entryPolicyVersion:MODEL_ENTRY_POLICY,mode:policy.mode,decisionEngine:'rules',
-  analystRole:'review_only',objective:'Evaluate actual fee-adjusted Demo net PnL, shared-capital drawdown and calendar-month results; entry count is not the objective.',
-  adaptiveParameters:{version:ADAPTIVE_FLOW_VERSION,bounds:ADAPTIVE_FLOW_BOUNDS,inputs:'Latest Demo spread / closed15m ATR, round-trip cost / planned3ATR distance, and hypothetical1USDT-risk notional / minimum opposing top-five depth across three samples.',method:'Deterministically recalculate at every entry evaluation. Mainly scale risk budget continuously to0.25–1USDT; directional share rises within55–60%, cost buffer within30–40bps. Persist raw-input identity and computed pressures; native rederives before send.',calibration:'Prospective bounded engineering rule, not fitted profitability or learning from a handful of closed trades. Existing position plans remain immutable.'},
-  volatilityResponse:{version:'closed5m-volatility-v1',candleTimeframe:'5m',fastPeriod:7,slowPeriod:14,fastLookbackMinutes:35,slowLookbackMinutes:70,
-   method:'Use15 contiguous fully closed5m HLC bars to derive14 true ranges. Compare last7TR mean with last14TR mean. Multiply the existing unrounded risk scale by min(1,slow/fast), then floor the budget at0.25USDT and round down12 decimals. If fast is zero the multiplier is1. Recompute on each minute decision; new bar data arrive every5m. No new direction/support gate, target increase or stop reduction.',
-   provenance:'Persist raw15bars and boundary in adaptive v2 inputs, with raw-precision calculation and12-decimal display evidence. Native v12 rederives at all order boundaries. Existing15m/210min exit distances and old plans remain immutable.'},
-  decisionCadence:{version:FLOW_DECISION_CADENCE_VERSION,intervalMs:FLOW_DECISION_INTERVAL_MS,candleTimeframe:'5m',atrTimeframe:'15m',rule:'Refresh flow decisions every minute with an exclusive one-minute deadline. Complete5m bars supply35/70min volatility sizing and aligned15m ATR exit distances; no fabricated1m ATR or forced entry.'},
-  parameters:snapshot.volumeExperiment?{...DEMO_PARAMETERS,relativeVolumeMinimum:volumeMinimum(snapshot)}:DEMO_PARAMETERS,
-  volumeExperiment:validateVolumeAssignment(snapshot.volumeExperiment,snapshot.candleBoundary),
-  execution:{version:'per-pair-cycle-v1',policy:'Process distinct eligible pairs serially within one immutable flow snapshot. Recheck holdings, capacity and all per-order guards. Unknown or throwing submission stops the batch; a submission is not a fill.'},
-  entrySignalEngine:'sampled_order_flow',model:{checkpoint:'NeoQuasar/Kronos-small',role:'observation_only',usedForEntryDecision:false,weights:'Existing checkpoint weights remain; an independent5m observer selects candle-aligned snapshots. Its implementation fingerprint changes with source changes. The producer never sends orders.'},
-  futuresAiAssist:policy.mode==='demo-futures'?{version:'futures-kronos-flow-v1',enabled:true,scope:'futures only',role:'advisory direction veto',rule:'Require the pinned Kronos three-step forecast to stay on the same side of the origin close as the sampled order-flow direction. A disagreement or unavailable prediction is HOLD.',authority:'Order flow, executable quote continuation, costs, ATR geometry, native risk and protection remain authoritative; the forecast is not expected return or a profit guarantee.'}:null,
+ if(snapshot.entryPolicyVersion===KEV_FLOW_POLICY||policy.entryPolicyVersion===KEV_FLOW_POLICY)return kevFlowContract(policy,snapshot);
+ return {
+  version:2,ruleVersion:DEMO_RULE_VERSION,entryPolicyVersion:MODEL_ENTRY_POLICY,mode:policy.mode,
+  directionCapabilities:policy.mode==='demo'
+   ?{long:'buy',short:null,closeLong:'sell',closeShort:null,shortStatus:'unavailable_on_binance_spot_demo',shortReason:'SPOT_SHORT_REQUIRES_MARGIN'}
+   :{long:'open-long',short:'open-short',closeLong:'close-long',closeShort:'close-short',shortStatus:'available_on_usdt_perpetual_demo'},
+  decisionEngine:'rules',analystRole:'review_only',
+  kevEntryReview:{version:'kev-codex-entry-v1',enabled:snapshot.kevEntry?.enabled===true,
+   activation:'Per-mode local/kev-entry.json; activation and config are included in the entry-time source fingerprint.',
+   model:snapshot.kevEntry?.model??null,decisionMode:snapshot.kevEntry?.decisionMode??'approval',
+   role:'approve/veto existing native-eligible candidates or autonomously select one candidate when configured',
+   cadence:'One request per snapshot only when an eligible entry exists; no request for HOLD or exits.',
+   failure:'Missing, declined, expired, mismatched or unavailable review blocks new entries. Native exits never wait for this service.',
+   limits:'No direction reversal, size/stop changes, guard bypass, or profitability guarantee. Probabilities are uncalibrated model estimates.'},
+  objective:'Evaluate actual fee-adjusted Demo net PnL, drawdown and calendar-month results. Entry count and forecast amplitude do not establish profitability.',
+  executionQuality:null,
+  orderFlow:{version:'sampled-demo-flow-v1',sampling:'Continuous 10-second REST depth and 60-second aggregate-trade samples; not event OFI.',
+   usedForEntryDecision:false,usedForNewAiExits:false,
+   entry:'The pinned model direction selects the side. Sampled order flow remains research evidence.',
+   degradation:'Missing flow does not veto AI direction; quote, cost, clock, risk and model evidence remain mandatory.',
+   lossCooldown:{version:'flow-loss-cooldown-v1',durationMs:600000,rule:'A closed negative Demo fill blocks only the same pair for ten minutes, including AI entries.'}},
+  adaptiveParameters:{version:ADAPTIVE_FLOW_VERSION,bounds:ADAPTIVE_FLOW_BOUNDS,activeForNewAiEntries:false,
+   method:'Historical flow plans retain their adaptive risk. Current AI entries use the fixed maximum 1 USDT stress-risk budget.'},
+  volatilityResponse:{version:'closed5m-volatility-v1',activeForNewAiEntries:false,
+   method:'The 35/70-minute adaptive flow multiplier is not applied by AI entries. Closed 15m ATR still sets stop and target distances.'},
+  decisionCadence:{version:FLOW_DECISION_CADENCE_VERSION,intervalMs:FLOW_DECISION_INTERVAL_MS,
+   entryVersion:AI_ENTRY_CADENCE_VERSION,entryIntervalMs:AI_ENTRY_INTERVAL_MS,entryWindowMs:AI_ENTRY_WINDOW_MS,
+   candleTimeframe:'5m',atrTimeframe:'15m',
+   rule:'Observe every minute. Evaluate AI entries only in the first minute after a complete 5m candle using its exact snapshot and fresh prediction. Other minutes record MODEL_NEXT_CANDLE_WAIT without waiting for a nonexistent forecast.'},
+  parameters:DEMO_PARAMETERS,volumeExperiment:null,
+  execution:{version:'per-pair-cycle-v1',policy:'Process distinct eligible pairs serially within one immutable snapshot; recheck capacity and guards. Unknown submission stops the batch. A submission is not a fill.'},
+  entrySignalEngine:'kronos_ai',
+  model:{checkpoint:'NeoQuasar/Kronos-small',role:'entry_direction_authority',usedForEntryDecision:true,
+   weights:'Existing pinned weights and three-step forecast; the producer never submits orders.',
+   quality:'Price-MAE underperformance is diagnostic; unavailable or stale validated evidence prevents entry.'},
+  modelAssist:{version:'kronos-flow-v1',enabled:true,scope:policy.mode==='demo'?'spot and long-only entry direction':'futures entry direction',
+   role:'entry direction authority',rule:'Three forecast closes must remain strictly on one side of the origin close.',
+   authority:'Quotes, full costs, ATR geometry, risk, time and native protection remain mandatory.'},
   entries:{actions:policy.mode==='demo'?['buy']:['open-long','open-short'],
-   direction:'Observed Demo taker notional >=55% in the chosen direction, matching top-five depth in three samples, and favorable mid-price change. Spot Demo executes long only; a bearish spot hypothesis is recorded as unavailable until a verified Margin route exists. Futures supports either direction.',
-   momentum:'No K-line momentum, SMA, trend, pullback, reclaim or model direction gate. Valid complete closed bars supply ATR risk distances only.',
-   averages:'No moving-average entry gate.',volume:'No candle-volume entry gate. Actual taker tape is required. The retired volume experiment is not supported.',breakout:'No breakout or pullback route.',
-   confirmation:'Native guard v12 verifies raw Demo flow and the15 complete5m bars, then recomputes adaptive v2 at callback, context and wire; exact snapshot/tag/proof hash, quote, clock and minute deadline. Legacy v10/v11 plans retain their historical contract. No model read or wait on the order path.',
-   costs:'Original full round-trip cost plus at least30bps, adapting up to40bps with spread/ATR pressure. Planned 3x closed-15m ATR target divided by executable quote must cover that space; target minus costs >= stop plus costs plus native reserve. Exit geometry is not forecast return.',
-   selection:policy.mode==='demo'?'Rank eligible pairs by last minus first depth imbalance, then planned net reward minus stressed risk; ranking does not reject candidates and is not expected profit.':'Rank eligible pairs by planned net reward minus stressed risk in bps; not expected profit.'},
-  sizing:{riskBudgetUsdt:DEMO_RISK_BUDGET_USDT,maxStakeUsdt:policy.maxStakeUsdt,
-   riskPolicy:demoRiskPolicy(policy.mode),
-   method:'Scale the maximum1USDT risk budget by the persisted adaptive riskScale0.25–1, then divide by (stopFraction + unchanged estimatedRoundTripCostBps /10000 + riskPolicy.reserveFraction); also cap by available exposure and host limits. Spot adds50bps of entry notional for the native0.995 stop-limit interval, conservatively before favorable tick rounding; futures stop-market retains original costs with no bounded-fill claim. Reject if exchange minimum cannot fit. This is a stress estimate, not a guaranteed loss ceiling.',
+   direction:'The pinned three-step forecast selects the side. Spot is long-only; bearish forecasts are unavailable as SPOT_SHORT_REQUIRES_MARGIN. Futures permits either side.',
+   momentum:'The pinned model direction is authoritative; K-line momentum, SMA, trend, pullback and order flow are diagnostic only.',
+   averages:'No moving-average entry gate.',volume:'No candle-volume or taker-flow gate. The retired volume experiment is not supported for new entries.',breakout:'No breakout or pullback gate.',
+   confirmation:'Native guard v10 validates path, snapshot/tag, clock and first-minute deadline, quote, ATR and costs at callback, context and wire. AI plans use the model candle deadline; historical flow plans retain their cadence.',
+   costs:'Full estimated round-trip cost plus 30bps buffer must fit planned 2x closed-15m ATR target space and forecast amplitude versus executable quote. ATR fractions use origin close. Forecast surplus must be strictly positive.',
+   selection:'Rank by forecast surplus above required cost space, then pair as deterministic tie-break. This is not calibrated expected profit.',
+   netRewardRiskGate:false},
+  sizing:{riskBudgetUsdt:DEMO_RISK_BUDGET_USDT,maxStakeUsdt:policy.maxStakeUsdt,riskPolicy:demoRiskPolicy(policy.mode),
+   method:'Divide the fixed maximum 1 USDT stress-risk budget by stopFraction + estimatedRoundTripCostBps/10000 + native reserve; cap by exposure/stake and reject undersized orders. Spot reserves 50bps for its stop-limit interval. This is not a guaranteed loss ceiling.',
    leverage:1,maxEntriesPerDay:policy.maxEntriesPerDay===0?'unlimited':policy.maxEntriesPerDay},
-  exits:{owner:'native_engine',stopPriceVersion:'stable-unarmed-stop-v1',stopPrecision:'Before monetary trailing activation, retain an existing tighter ATR stop without repeated price/ratio conversion. This prevents rounding drift; tighter existing stops never widen.',nativeVersion:'demo-rule-exits-v12',plan:'Each position retains its entry-time ATR target, initial stop, time limit and profit-protection policy. v10/v11/v12 use a persistent net-profit peak minus giveback floor; old v9 trades keep fee-aware breakeven. Existing v11 positions retain their original plan. The 15-minute model forecast horizon does not change the retained native four-hour maximum holding rule. Prose cannot amend orders.',
-   accounting:'After triggerNetUsdt is reached, the native stop tightens to cover peak net unrealized USDT minus givebackNetUsdt, including engine fees and funding. It never loosens or resets on restart. Price gaps, stop-limit non-fills and slippage can exceed this desired floor; realized PnL comes only from actual fills.'}};
+  exits:{owner:'native_engine',nativeVersion:'demo-rule-exits-v12',stopPriceVersion:'stable-unarmed-stop-v1',
+   stopPrecision:'Retain tighter existing stops without conversion drift; never widen them.',
+   plan:'Each position retains its original stop, target, time limit and profit protection. Existing v11 positions retain their original plan. New AI plans use 2 ATR target, 1 ATR stop capped at 2%, net-profit trailing and four-hour maximum hold. Historical flow exits remain attached only to their recorded plans.',
+   accounting:'Trailing uses recorded net-profit peak and fees/funding. Slippage, gaps and stop-limit non-fills may exceed planned loss. Actual fills alone establish realized PnL.'}
+ };
 }
-
+function kevFlowContract(policy,snapshot){
+ const legacy=demoStrategyContract({...policy,entryPolicyVersion:undefined}),model=snapshot.kevEntry?.model??null;
+ return {...legacy,version:3,ruleVersion:KEV_FLOW_POLICY,entryPolicyVersion:KEV_FLOW_POLICY,entrySignalEngine:'kev_order_flow',
+  kevEntryReview:{...legacy.kevEntryReview,enabled:snapshot.kevEntry?.enabled===true,model,decisionMode:'autonomous',
+   role:'Choose one verified pair and direction from fresh order-book and taker-trade observations, or HOLD.',
+   cadence:'At most one bounded request per fresh minute with cost/risk-eligible candidates; no request for exits.',
+   limits:'Spot buy or HOLD; futures long, short or HOLD. No order submission, size/stop changes, guard bypass or profit guarantee.'},
+  orderFlow:{...legacy.orderFlow,usedForEntryDecision:true,
+   entry:'Kev directly selects the pair and side from fresh sampled depth, aggressive trades and short-term price changes.',
+   degradation:'Missing, malformed or stale order flow blocks the affected candidate. No candle or model-forecast fallback.'},
+  adaptiveParameters:{...legacy.adaptiveParameters,method:'Fixed maximum 1 USDT estimated stress-risk budget; historical plans retain their recorded sizing.'},
+  volatilityResponse:{version:'kev-flow-fixed-exits-v1',activeForNewAiEntries:false,method:'New entries use fixed 0.5% stop and 1.5% target; no candles or ATR are collected for this entry route.'},
+  decisionCadence:{version:FLOW_DECISION_CADENCE_VERSION,intervalMs:FLOW_DECISION_INTERVAL_MS,
+   entryVersion:KEV_FLOW_POLICY,entryIntervalMs:FLOW_DECISION_INTERVAL_MS,entryWindowMs:FLOW_DECISION_INTERVAL_MS,
+   candleTimeframe:null,atrTimeframe:null,rule:'Fresh minute decisions expire at the next minute. Every minute is eligible without waiting for a K-line close. Sampling is REST, not subsecond exchange execution.'},
+  parameters:KEV_FLOW_PARAMETERS,
+  execution:{version:'per-pair-cycle-v1',policy:'Only the single Kev-approved pair/direction can enter, after independent risk and native protection checks. Submission is not a fill.'},
+  model:{checkpoint:null,model,role:'kev_order_flow_entry_authority',usedForEntryDecision:true,
+   weights:'Kev-format decision service uses Codex CLI; no local Kev weights or Kronos prediction is required.',
+   quality:'Missing, malformed, tied, expired or unavailable decision means HOLD. Choice probabilities are uncalibrated.'},
+  modelAssist:{version:'kronos-flow-v1',enabled:false,scope:'independent research only',role:'no entry authority',rule:'Kronos predictions are not requested by this entry route.',authority:'No candle or forecast gate.'},
+  entries:{actions:policy.mode==='demo'?['buy']:['open-long','open-short'],
+   direction:'Kev chooses the pair and direction, or HOLD, from all fresh candidates that pass data, cost, capacity and risk checks.',
+   momentum:'Short-term raw-trade price changes are decision context; no candle momentum gate.',averages:'No moving-average entry gate.',
+   volume:'Raw taker trades and order-book depth are model context; no deterministic directional flow threshold.',breakout:'No breakout or pullback gate.',
+   confirmation:KEV_NATIVE_VERSION+' verifies the stored Kev approval, snapshot, data proof, clock, minute expiry, quote, fixed exits, costs and risk at callback, context and wire.',
+   costs:'The fixed 150bps target must cover complete round-trip cost plus 30bps buffer; planned net reward must exceed planned stop risk. Target space is not a forecast.',
+   selection:'Kev autonomously chooses one pair and side or HOLD; no Kronos candidate filtering or deterministic directional ranking.',netRewardRiskGate:true},
+  exits:{...legacy.exits,plan:'Each existing position retains its original plan. New Kev plans use a fixed 0.5% stop, 1.5% target, native net-profit trailing and 15-minute maximum hold. Native exits never wait for Kev.'}};
+}
 export function renderDemoStrategyContract(contract){
+ if(contract.entryPolicyVersion===KEV_FLOW_POLICY)return ['# Host-generated Demo strategy contract',
+  'Kev 直接使用即時訂單簿、主動買賣成交與短期價格變化選交易對、方向或 HOLD。現貨只做多；合約可做多或做空。',
+  '每分鐘重新判斷，不收集 K 線或 ATR，不等待 Kronos 預測。一次候選合併成一次 CLI 請求；過期、格式錯誤或服務不可用即 HOLD。',
+  '資料、報價、完整成本、倉位、風險及原生保護仍須通過。新倉固定停損 0.5%、停利 1.5%、最長持倉 15 分鐘，估算風險預算最高 1 USDT；此預算不是最大損失保證。',
+  '原有持倉保留原計畫，停損與平倉不等待 Kev。以實際成交和費後損益評估，不以模型機率、目標價格或交易次數當作獲利證據。',
+  JSON.stringify(contract)].join('\n\n');
  return ['# Host-generated Demo strategy contract',
-  'Demo 訂單流單一路徑：成交力道、連續深度與中間價決定方向；不再要求 K 線趨勢、回檔恢復或模型同意。現貨 Demo 只能買入建立多單與賣出平多；空方研究假設回傳 HOLD/SPOT_SHORT_REQUIRES_MARGIN，不能把現貨賣出當成裸空。訂單流缺失或過期時等待新資料。',
-  '模型持續以5分鐘已收盤資料獨立觀察，但缺失、停止或反向都不阻擋本政策。K 線提供風險距離及波動倉位縮放；新進場另外要求方向性中間價至少0.25 bps，且三次五檔深度的絕對偏斜不超過70%；合約送單前還要確認可成交的買一／賣一仍沿樣本方向延續，若報價反穿則等待下一分鐘；原生 guard v12 驗證訂單流原始證據、來源、時效、成本與風險，並重算新自適應參數。',
-  ...(contract.executionQuality?['現貨下單前的賣一報價必須高於三筆深度中第一筆的賣一價；回到起點或更低則取消當次進場，下個週期重新評估。原生端另驗證 callback 參考價；市價單最終成交價仍可能變動。這是待驗證的進場假設。']:[]),
-  ...(contract.executionQuality?['現貨候選先依買盤深度優勢的變化排序。新現貨持倉若三次新鮮反向訂單流觀察跨越至少20秒、成交編號推進且觀察間隔不超過20秒，原生引擎提早退出；重疊60秒窗代表持續性，並非独立樣本。資料缺失、恢復或中斷會重置確認。原有停損、停利與風險金額不放大。']:[]),
-  '計畫目標減去完整成本，至少覆蓋初始停損加完整成本及現貨原生停損限價保留額；3 倍 ATR 目標另須覆蓋成本加原有 30 bps。目標空間不是預期獲利。',
-  '每次評估按當下價差／ATR、完整成本及對手盤深度，將每筆風險預算在0.25～1 USDT連續調整；成交力道門檻55～60%，成本緩衝30～40 bps。負數成交後，同一幣對冷卻10分鐘，其他幣對仍可評估；保存依據並由原生端重算。這是前向測試的有界規則，尚未證明提升獲利；只有實際成交扣費淨損益能判定改善。',
-  '每1分鐘重新判斷訂單流及倉位。最近35分鐘波動高於70分鐘基準時，按慢／快波動比縮小新倉，計畫風險最低0.25 USDT；不增加進場門檻。只使用完整5分鐘K線，波動樣本每5分鐘更新。停損停利保留原15分鐘ATR距離，不改寫已開倉計畫。每次決策到下一分鐘即失效，不能重播舊訊號。',
+  'Demo 進場由已收盤 AI 三步預測選擇方向；三步必須同在原始收盤價的一側。AI 同意後，成本、報價、ATR、倉位、期限及原生停損仍須通過。現貨只做多，空方假設為 HOLD/SPOT_SHORT_REQUIRES_MARGIN；合約可做多或做空。',
+  '每分鐘更新行情、倉位及風控；AI 新進場只在完整五分鐘 K 線後的首分鐘評估。其他分鐘等待下一根 K 線，不等待不存在的新預測，也不延用過期訊號。',
+  '若已啟用 Kev／Codex 進場覆核，只將本輪合格候選合併送交一次 CLI；自主模式可選一個既有候選或 HOLD，批准僅適用同一快照、幣對、方向及短效期限。拒絕、逾時、格式錯誤或服務離線均不進場。原生平倉與停損不等待此覆核。',
+  '訂單流、K 線動能、均線、成交量與舊 volume experiment 不作 AI 進場門檻。新 AI 計畫沒有訂單流退出或 flow 動態縮倉；舊倉仍按各自原計畫退出。',
+  '現行 AI 使用最高 1 USDT 估算風險預算，含完整成本與現貨原生停損限價保留額，另受倉位及曝險限制。虧損平倉後同幣對冷卻十分鐘。估算預算不是最大損失保證。',
+  '2 倍已完成 15 分鐘 ATR 目標與模型相對可成交報價的幅度，都必須覆蓋完整成本及 30bps 緩衝。此路徑沒有額外的 flow 淨報酬風險比門檻；ATR 空間與預測幅度不是預期獲利。',
+  '以實際 Demo 成交、費後損益與回撤判定結果。模型比較器是隔離研究，不會自動取代下單模型。',
   JSON.stringify(contract)].join('\n\n');
 }

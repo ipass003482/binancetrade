@@ -10,7 +10,7 @@ import {readJson,writeJson,journalRead} from '../src/io.mjs';
 import {evaluatePerformance} from '../src/performance.mjs';
 
 const MODES=['demo','demo-futures'],ENTRY=new Set(['buy','open-long','open-short']);
-const GOAL_RULE_VERSIONS=new Set(['kronos-forward-v11','kronos-direction-v12']);
+const GOAL_RULE_VERSIONS=new Set(['kronos-forward-v11','kronos-direction-v12','kev-order-flow-v1']);
 const SETTLED=new Set(['submitted','reconciled']),STATUSES=new Set(['pending','unknown','submitted','reconciled','rejected','hold']);
 const HEX=/^[a-f0-9]{64}$/,ID=/^[a-f0-9]{32}$/;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -22,17 +22,40 @@ const errorCode=error=>/^[A-Z][A-Z0-9_]{2,80}/.exec(String(error?.code??error?.m
 const positive=value=>typeof value==='number'&&Number.isFinite(value)&&value>0;
 
 function validateGoal(goal,observedAt){
- const nativeFlow=goal?.entryPolicyVersion==='order-flow-only-v1';
+ const nativeFlow=['order-flow-only-v1','kev-order-flow-v1'].includes(goal?.entryPolicyVersion);
  if(!goal||goal.schemaVersion!==1||goal.source!=='freqtrade-demo'||typeof goal.id!=='string'||!goal.id.length||
   !time(goal.startedAt)||!time(observedAt)||Date.parse(goal.startedAt)>Date.parse(observedAt)||
   !GOAL_RULE_VERSIONS.has(goal.ruleVersion)||(nativeFlow?goal.modelFingerprint!==null:!HEX.test(goal.modelFingerprint??''))||
   !Number.isSafeInteger(goal.targetPerMode)||goal.targetPerMode<1||goal.deadline!==null)
   throw Error('TRADE_GOAL_INVALID');
+ if(goal.entryPolicyVersion==='kev-order-flow-v1'&&goal.ruleVersion!=='kev-order-flow-v1')throw Error('TRADE_GOAL_INVALID');
+ if(goal.kevOrderFlowAmendment&&(goal.kevOrderFlowAmendment.ruleVersion!=='kev-order-flow-v1'||
+  !time(goal.kevOrderFlowAmendment.effectiveAt)||Date.parse(goal.kevOrderFlowAmendment.effectiveAt)<Date.parse(goal.startedAt)))
+  throw Error('TRADE_GOAL_INVALID_AMENDMENT');
  for(const mode of MODES){const baseline=goal.modes?.[mode];
   if(!baseline||!Array.isArray(baseline.excludedTradeIds)||baseline.excludedTradeIds.some(id=>!key(id))||
    new Set(baseline.excludedTradeIds.map(key)).size!==baseline.excludedTradeIds.length||
    baseline.baselineTradeCount!==baseline.excludedTradeIds.length)throw Error('TRADE_GOAL_INVALID_BASELINE');
  }
+}
+
+function kevReceiptValid(pending){
+ const evidence=pending.entryEvidence,receipt=evidence?.kevReview,d=receipt?.decision;
+ return pending.model==null&&pending.ruleVersion==='kev-order-flow-v1'&&pending.entrySignalEngine==='kev_order_flow'&&
+  evidence?.version==='kev-order-flow-evidence-v1'&&
+  evidence.usedForEntryDecision===true&&evidence.snapshotId===pending.snapshotId&&HEX.test(evidence.proofSha256??'')&&
+  receipt?.version==='kev-codex-entry-v1'&&receipt.provider==='codex-cli'&&receipt.decisionMode==='autonomous'&&
+  receipt.snapshotId===pending.snapshotId&&['snapshotSha256','configSha256','proofSha256'].every(k=>HEX.test(receipt[k]??''))&&
+  typeof receipt.model==='string'&&receipt.model.length>0&&typeof receipt.requestId==='string'&&receipt.requestId.length>0&&
+  receipt.probabilitiesCalibrated===false&&d?.approved===true&&d.pair===pending.pair&&d.action===pending.action&&d.choice==='select'&&
+  typeof receipt.selection?.choice==='string'&&receipt.selection.choice!=='hold'&&
+  time(receipt.completedAt)&&time(receipt.expiresAt)&&Date.parse(receipt.completedAt)<=Date.parse(pending.at)&&
+  Date.parse(pending.at)<Date.parse(receipt.expiresAt)&&Boolean(pending.riskPolicy);
+}
+function kevAllowed(goal,pending){
+ return pending?.entryPolicyVersion==='kev-order-flow-v1'&&pending.ruleVersion==='kev-order-flow-v1'&&
+  (goal.entryPolicyVersion==='kev-order-flow-v1'||Boolean(goal.kevOrderFlowAmendment&&
+   Date.parse(pending.at)>=Date.parse(goal.kevOrderFlowAmendment.effectiveAt)));
 }
 
 function statesFromJournal(journal,observedAt,warnings){
@@ -132,7 +155,10 @@ function reviewMode({goal,history,journal,mode,observedAt}){
   if(matches.length!==1){const code=matches.length?'AMBIGUOUS_ENTRY_JOURNAL':'UNATTRIBUTED_GOAL_TRADE';ignore(code);warnings.push({code,tradeId:id});continue;}
   const state=matches[0],pending=state.pending;
   if(pending?.purpose==='execution_probe'){ignore('EXECUTION_PROBE');continue;}
-  if(pending&&pending.ruleVersion!==goal.ruleVersion){ignore('OTHER_STRATEGY_VERSION');continue;}
+  if(pending&&pending.ruleVersion!==goal.ruleVersion&&!kevAllowed(goal,pending)){ignore('OTHER_STRATEGY_VERSION');continue;}
+  const kevFlow=pending?.entryPolicyVersion==='kev-order-flow-v1';
+  if(goal.entryPolicyVersion==='kev-order-flow-v1'&&!kevFlow){ignore('OTHER_ENTRY_POLICY');continue;}
+  if(kevFlow&&!kevAllowed(goal,pending)){ignore('OTHER_ENTRY_ENGINE');continue;}
   const flowOnly=pending?.entryPolicyVersion==='order-flow-only-v1';
   const nativeFlow=goal.entryPolicyVersion==='order-flow-only-v1';
   if(nativeFlow&&!flowOnly){ignore('OTHER_ENTRY_POLICY');continue;}
@@ -143,13 +169,13 @@ function reviewMode({goal,history,journal,mode,observedAt}){
    key(state.tradeId)!==id||state.tag!==trade.enter_tag||state.pair!==trade.pair||state.action!==expectedAction||
    pending.tag!=='codex-'+state.id||Date.parse(pending.at)<start)reason='ENTRY_SUBMISSION_NOT_CONFIRMED';
   else if(!UUID.test(pending.snapshotId??'')||recordedEntryId(pending)!==state.id)reason='ENTRY_IDENTITY_MISMATCH';
-  else if(flowOnly?(pending.model!=null||pending.entrySignalEngine!=='sampled_order_flow'||pending.entryRoute!=='order-flow'||
+  else if(kevFlow?!kevReceiptValid(pending):flowOnly?(pending.model!=null||pending.entrySignalEngine!=='sampled_order_flow'||pending.entryRoute!=='order-flow'||
    pending.entryEvidence?.version!=='order-flow-evidence-v1'||pending.entryEvidence?.usedForEntryDecision!==true||
    pending.entryEvidence?.snapshotId!==pending.snapshotId||!HEX.test(pending.entryEvidence?.proofSha256??'')||!pending.riskPolicy):
    (pending.model?.modelFingerprint!==goal.modelFingerprint||pending.model?.usedForEntryDecision!==true||
    !HEX.test(pending.model?.predictionSha256??'')||pending.model.snapshotId!==pending.snapshotId||
-   !time(pending.model.issuedAt)||Date.parse(pending.model.issuedAt)>Date.parse(pending.at)))reason=flowOnly?'FLOW_ATTRIBUTION_MISMATCH':'MODEL_ATTRIBUTION_MISMATCH';
-  else if(['trial_version','strategyVersion','ruleVersion'].some(field=>trade[field]!==undefined&&trade[field]!==goal.ruleVersion))reason='TRADE_VERSION_MISMATCH';
+   !time(pending.model.issuedAt)||Date.parse(pending.model.issuedAt)>Date.parse(pending.at)))reason=kevFlow?'KEV_FLOW_ATTRIBUTION_MISMATCH':flowOnly?'FLOW_ATTRIBUTION_MISMATCH':'MODEL_ATTRIBUTION_MISMATCH';
+  else if(['trial_version','strategyVersion','ruleVersion'].some(field=>trade[field]!==undefined&&trade[field]!==pending.ruleVersion))reason='TRADE_VERSION_MISMATCH';
   const validation=evaluatePerformance({trades:[trade],mode,observedAt});
   if(!reason&&validation.diagnostics.length)reason='INVALID_TRADE_EVIDENCE';
   if(!reason&&pending.riskPolicy!==undefined){
@@ -158,7 +184,7 @@ function reviewMode({goal,history,journal,mode,observedAt}){
     reason='RISK_ATTRIBUTION_MISMATCH';
   }
   if(!reason&&pending.entryPolicyVersion==='trend-pullback-flow-v1'&&!['pullback','order-flow'].includes(pending.entryRoute))reason='ENTRY_ROUTE_ATTRIBUTION_MISMATCH';
-  if(!reason&&pending.entryPolicyVersion!==undefined&&(!['closed-price-momentum-v1','forecast-net-edge-v1','trend-pullback-model-v1','trend-pullback-flow-v1','order-flow-only-v1'].includes(pending.entryPolicyVersion)||!HEX.test(pending.strategyFingerprint??'')))reason='ENTRY_POLICY_ATTRIBUTION_MISMATCH';
+  if(!reason&&pending.entryPolicyVersion!==undefined&&(!['closed-price-momentum-v1','forecast-net-edge-v1','trend-pullback-model-v1','trend-pullback-flow-v1','order-flow-only-v1','kev-order-flow-v1'].includes(pending.entryPolicyVersion)||!HEX.test(pending.strategyFingerprint??'')))reason='ENTRY_POLICY_ATTRIBUTION_MISMATCH';
   if(!reason&&Object.hasOwn(pending,'executionQualityVersion')&&(mode!=='demo'||!flowOnly||
    !['flow-price-continuation-v1','flow-strength-exit-v1','flow-confirmed-exit-v2'].includes(pending.executionQualityVersion)))reason='EXECUTION_QUALITY_ATTRIBUTION_MISMATCH';
   const fill=fillEvidence(trade,start,end);if(!reason&&fill.reason)reason=fill.reason;
@@ -168,12 +194,12 @@ function reviewMode({goal,history,journal,mode,observedAt}){
    filledAt:fill.filledAt,closedAt:trade.is_open?null:new Date(trade.close_timestamp).toISOString(),
    entryOrderIds:fill.orderIds,journalId:state.id,journalStatus:state.status,entrySignalEngine:pending.entrySignalEngine??'kronos_pretrained',entryEvidence:pending.entryEvidence??null,modelFingerprint:pending.model?.modelFingerprint??null,
    predictionSha256:pending.model?.predictionSha256??null,riskPolicyVersion:pending.riskPolicy?.version??'legacy-unrecorded',
-   entryRoute:pending.entryRoute??'legacy-unrecorded',entryPolicyVersion:pending.entryPolicyVersion??(pending.ruleVersion==='kronos-direction-v12'?'direction-only-v12':'legacy-unrecorded'),strategyFingerprint:pending.strategyFingerprint??null,executionPolicyVersion:pending.executionPolicyVersion??'single-entry-cycle',
+   entryRoute:pending.entryRoute??(kevFlow?'kev-order-flow':'legacy-unrecorded'),entryPolicyVersion:pending.entryPolicyVersion??(pending.ruleVersion==='kronos-direction-v12'?'direction-only-v12':'legacy-unrecorded'),strategyFingerprint:pending.strategyFingerprint??null,executionPolicyVersion:pending.executionPolicyVersion??'single-entry-cycle',
    executionQualityVersion:mode==='demo-futures'?'not-applicable':pending.executionQualityVersion??'legacy-unrecorded',netRealizedUsdt:trade.is_open?null:String(trade.profit_abs),
    netUnrealizedUsdt:trade.is_open?String(trade.profit_abs):null}});
  }
  for(const state of states){const p=state.pending;
-  if(!p||!ENTRY.has(p.action)||p.purpose!=='strategy'||p.ruleVersion!==goal.ruleVersion||Date.parse(p.at)<start)continue;
+  if(!p||!ENTRY.has(p.action)||p.purpose!=='strategy'||(p.ruleVersion!==goal.ruleVersion&&!kevAllowed(goal,p))||Date.parse(p.at)<start)continue;
   if(goal.entryPolicyVersion==='order-flow-only-v1'&&p.entryPolicyVersion!==goal.entryPolicyVersion)continue;
   if(['pending','unknown'].includes(state.status)||state.invalid)warnings.push({code:'UNRESOLVED_OR_INVALID_GOAL_INTENT',journalId:state.id,status:state.status});
   if(SETTLED.has(state.status)&&!unique.some(t=>key(t.trade_id)===key(state.tradeId)&&t.enter_tag===state.tag&&t.pair===state.pair))
@@ -213,7 +239,7 @@ export function buildTradeGoalReview({goal,histories={},journals={},observedAt}=
  const modes=Object.fromEntries(MODES.map(mode=>[mode,reviewMode({goal,history:histories[mode],journal:journals[mode],mode,observedAt})]));
  const completed=MODES.every(mode=>modes[mode].complete);
  return {schemaVersion:1,source:'freqtrade-demo-trade-goal-review',goalId:goal.id,observedAt,startedAt:goal.startedAt,
-  ruleVersion:goal.ruleVersion,modelFingerprint:goal.modelFingerprint,...(goal.entryPolicyVersion==='order-flow-only-v1'?{entryPolicyVersion:goal.entryPolicyVersion}:{}),targetPerMode:goal.targetPerMode,deadline:null,
+  ruleVersion:goal.ruleVersion,modelFingerprint:goal.modelFingerprint,...(['order-flow-only-v1','kev-order-flow-v1'].includes(goal.entryPolicyVersion)?{entryPolicyVersion:goal.entryPolicyVersion}:{}),targetPerMode:goal.targetPerMode,deadline:null,
   status:completed?'complete':MODES.some(mode=>modes[mode].status==='unavailable')?'unavailable':
    MODES.some(mode=>!modes[mode].evidenceComplete)?'incomplete_evidence':'collecting',completed,modes,
   countDefinition:'One newly filled strategy entry per mode and trade_id; its exit and split fills do not add entries.',

@@ -9,7 +9,9 @@ import { readJson, exists } from './io.mjs';
 import { FreqtradeClient } from './freqtrade.mjs';
 import { safeError,healthStatus,pidState } from './health.mjs';
 import { summarizeTrades } from './report.mjs';
-import { market } from './research.mjs';
+import { market,marketOrderFlow } from './research.mjs';
+import {loadKevEntryConfig} from './kev-entry.mjs';
+import {demoStrategyContract} from './strategy-contract.mjs';
 import { timeMonitor } from './time-monitor.mjs';
 import { loadDecisionConfig,RULE_ENGINE_VERSION } from './decision.mjs';
 import { readEntryDiagnostics } from './entry-diagnostics.mjs';
@@ -102,11 +104,14 @@ export async function readSupervisorView(file,{now=Date.now(),state=pidState}={}
    cycleFresh:typeof row.cycleFresh==='boolean'?row.cycleFresh:null,stopped:typeof row.stopped==='boolean'?row.stopped:null}))};
 }
 export async function dashboardState(mode,{local=modeLocal(mode),policy:providedPolicy,client:providedClient,
- getTiming=timeMonitor,getDecision=loadDecisionConfig,now=()=>Date.now(),readSession=readDemoSession,session:providedSession,
+ getTiming=timeMonitor,getDecision=loadDecisionConfig,getKevConfig=loadKevEntryConfig,now=()=>Date.now(),readSession=readDemoSession,session:providedSession,
  portfolioLocal=join(ROOT,'local','portfolio'),supervisorLocal=join(ROOT,'local','supervisor'),localFor=modeLocal}={}) {
  const started=now(),session=isDemo(mode)?(providedSession===undefined?await readSession({now:started}):providedSession):null;
  if(session)validateDemoSession(session,{now:started});
  const policy=providedPolicy??await loadPolicy(mode);
+ let kevConfig=null,kevConfigError=null;
+ if(isDemo(mode))try{kevConfig=await getKevConfig({local,mode});}catch(error){kevConfigError=safeError(error);}
+ const kevFlow=kevConfig?.marketData==='order-flow',entryPolicyVersion=kevFlow?'kev-order-flow-v1':undefined;
  let account=null,summary=null,trades=null,historyError=null,engineError=null,engineVersion=null;
  let snapshot=null;
  const tradingDisabled=await exists(join(local,'TRADING_DISABLED'));
@@ -133,7 +138,7 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
  }
  const observed=now(),snapshotClient={snapshot:async()=>{if(snapshot)return snapshot;throw Error(engineError??'ENGINE_UNAVAILABLE');}};
  const values=await Promise.allSettled([
-  healthStatus(local,snapshotClient,policy,{now:observed}),getTiming(local,mode),getDecision(),
+  healthStatus(local,snapshotClient,policy,{now:observed}),getTiming(local,mode,{entryPolicyVersion}),getDecision(),
   optionalJson(join(local,'equity-summary.json')),optionalJson(join(local,'forward-report.json')),
   isDemo(mode)?readPortfolioView(join(portfolioLocal,'report.json'),{now:observed}):null,
   isDemo(mode)?readSupervisorView(join(supervisorLocal,'status.json'),{now:observed}):null,
@@ -151,18 +156,24 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
  };
  const equity=scopedArtifact(value(3),'firstObservedAt','equity'),forward=scopedArtifact(value(4),'startedAt','forward'),portfolio=scopedArtifact(value(5),'startedAt','portfolio');
  let diagnostics=null,diagnosticsError=null;
- if(isDemo(mode)&&decision)try{diagnostics=await readEntryDiagnostics(local,{mode,ruleVersion:decision.ruleVersion,
+ if(isDemo(mode)&&decision)try{diagnostics=await readEntryDiagnostics(local,{mode,ruleVersion:entryPolicyVersion??decision.ruleVersion,
   allowance:operations.dailyEntryAllowance??null,now:observed,since:session?.startedAt??null});}catch(error){diagnosticsError=safeError(error);}
  return {mode,session,observedAt:new Date(observed).toISOString(),account,summary,trades,historyError,setup,engineError,decisions,tradingDisabled,stopped:await exists(join(local,'STOP')),
   operations,diagnostics,diagnosticsError,timing,equity,forward,portfolio,supervisor,protection,
   artifactErrors:[...sessionArtifactErrors,...values.flatMap((result,index)=>result.status==='rejected'?[{artifact:['operations','timing','strategy','equity','forward','portfolio','supervisor','protection'][index],code:safeError(result.reason)}]:[])],
-  strategy:{timeframe:policy.timeframe,decisionEngine:isDemo(mode)?decision?.demoEngine??null:'ai',ruleVersion:decision?.ruleVersion??null,engineVersion,rulesReady:engineVersion===RULE_ENGINE_VERSION},
+  strategy:{timeframe:kevFlow?'order-flow':policy.timeframe,entryPolicyVersion:entryPolicyVersion??null,
+   contract:isDemo(mode)?demoStrategyContract(policy,{entryPolicyVersion,kevEntry:{...kevConfig,model:kevConfig?.expectedModel}}):null,
+   configError:kevConfigError,decisionEngine:isDemo(mode)?decision?.demoEngine??null:'ai',ruleVersion:entryPolicyVersion??decision?.ruleVersion??null,engineVersion,rulesReady:engineVersion===RULE_ENGINE_VERSION},
   cycle:{stage:operations.cycle?.stage??'unknown',lastSuccessAt:operations.cycle?.lastSuccessAt??null},
   policy:{pairs:policy.pairs,...(isFutures(mode)?{marginMode:policy.marginMode,maxLeverage:policy.leverage,maxNotionalUsdt:policy.maxNotionalUsdt,maxTotalNotionalUsdt:policy.maxTotalNotionalUsdt}:{}),maxStakeUsdt:policy.maxStakeUsdt,maxExposureUsdt:policy.maxExposureUsdt,maxDailyLossUsdt:policy.maxDailyLossUsdt,maxOpenTrades:policy.maxOpenTrades,maxEntriesPerDay:policy.maxEntriesPerDay}};
 }
 const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/starfield.css','starfield.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs']]);
 const types={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',mjs:'text/javascript; charset=utf-8'};
-export function createDashboardServer({port=18100,state=dashboardState,quote=market,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope}={}) {
+export async function dashboardMarket(pair,{mode}={}){
+ const config=isDemo(mode)?await loadKevEntryConfig({local:modeLocal(mode),mode}):null;
+ return config?.marketData==='order-flow'?marketOrderFlow(pair,{mode}):market(pair,{mode});
+}
+export function createDashboardServer({port=18100,state=dashboardState,quote=dashboardMarket,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope}={}) {
  const inflight=new Map(),cache=new Map();
  async function cached(key,fn,ttl) {
   const old=cache.get(key);if(old&&Date.now()-old.at<ttl)return old.value;

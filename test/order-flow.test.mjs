@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {assessOrderFlow,assessSpotFlowContinuation,assessFuturesFlowContinuation,FLOW_SELECTIVITY,FLOW_VERSION} from '../src/order-flow.mjs';
+import {assessOrderFlow,assessFlowShock,assessSpotFlowContinuation,assessFuturesFlowContinuation,FLOW_SELECTIVITY,FLOW_VERSION} from '../src/order-flow.mjs';
 import {sampleOrderFlow} from '../src/order-flow-collector.mjs';
-import {modelRuleDecision,orderFlowRuleDecision} from '../src/demo-rules.mjs';
+import {aiEntryRuleDecision,modelRuleDecision,orderFlowRuleDecision} from '../src/demo-rules.mjs';
 const B=Date.parse('2026-09-15T00:00:00Z'),now=B+20000;
 test('spot continuation uses strict executable ask comparison and rejects unusable quotes',()=>{
  const p=proof();
@@ -49,6 +49,26 @@ test('sampled tape/depth confirms both sides and rejects stale, foreign, crossed
   assert.equal(assessOrderFlow(p,{...args,now:now+45001}).eligible,false);
  }
 });
+test('book alignment uses the latest two depth samples and ignores one noisy first sample',()=>{
+ const p=proof(),args={mode:p.mode,pair:p.pair,long:true,now};
+ for(const row of p.books[0].bids)row[1]='1';
+ for(const row of p.books[0].asks)row[1]='2';
+ // The first book sample is sell-heavy, while the current and immediately
+ // prior samples remain buy-heavy. Tape/book alignment is still required.
+ const aligned=assessOrderFlow(p,args);
+ assert.equal(aligned.eligible,true);
+ assert.equal(aligned.bookDirection,'buy');
+ assert.deepEqual(aligned.bookSigns,['sell','buy','buy']);
+ assert.equal(aligned.bookConsensusVersion,'latest-two-of-three-v1');
+ assert.equal(aligned.alignmentVersion,'flow-tape-book-alignment-v2');
+ const currentMismatch=structuredClone(p);
+ for(const row of currentMismatch.books[2].bids)row[1]='1';
+ for(const row of currentMismatch.books[2].asks)row[1]='2';
+ const blocked=assessOrderFlow(currentMismatch,args);
+ assert.equal(blocked.eligible,false);
+ assert.equal(blocked.bookDirection,null);
+ assert.equal(blocked.reason,'FLOW_TAPE_BOOK_MISMATCH');
+});
 function args(short=false,reclaim=false){
  const flow=proof(short),mode=flow.mode,pair=flow.pair;
  if(!short)for(const b of flow.books)for(const levels of [b.bids,b.asks])for(const row of levels)row[0]=String(Number(row[0])-1);
@@ -93,6 +113,14 @@ test('live selectivity rejects weak mid movement and extreme depth while retaini
  const extreme=structuredClone(p);for(const b of extreme.books){for(const row of b.bids)row[1]='6';for(const row of b.asks)row[1]='1';}
  assert.equal(assessOrderFlow(extreme,a).eligible,false);
 });
+test('entry shock guard blocks abrupt mid moves and spread expansion without affecting safe flow',()=>{
+ assert.equal(assessFlowShock({midChangeBps:'34.999',},{spreadBps:'15'}).eligible,true);
+ assert.equal(assessFlowShock({midChangeBps:'35'},{spreadBps:'1'}).reason,'FLOW_VOLATILITY_SHOCK');
+ assert.equal(assessFlowShock({midChangeBps:'-40'},{spreadBps:'1'}).reason,'FLOW_VOLATILITY_SHOCK');
+ assert.equal(assessFlowShock({midChangeBps:'2'},{spreadBps:'15.001'}).reason,'FLOW_LIQUIDITY_SHOCK');
+ assert.equal(assessFlowShock({midChangeBps:'2'},{spreadBps:'15'}).eligible,true);
+ assert.equal(assessFlowShock({midChangeBps:'2'},{spreadBps:null}).reason,'FLOW_SHOCK_DATA_INVALID');
+});
 
 test('one-minute flow decisions retain closed5m ATR, adapt entry inputs and reject expired minute evidence',()=>{
  for(const short of [false,true]){
@@ -125,6 +153,17 @@ test('new flow route can enter without closed reclaim; unavailable flow retains 
   const old=args(short,true);old.snapshot.markets[0].orderFlow=null;const kept=modelRuleDecision(old);assert.notEqual(kept.action,'hold');assert.equal(kept.entryRoute,'pullback');
  }
 });
+test('AI-only route ignores flow, momentum and retired volume gates while retaining model and cost checks',()=>{
+ const a=args(false),origin=Number(a.modelEvidence.prediction.forecasts[0].originClose);
+ a.modelEvidence.prediction.forecasts[0].forecastCloses=[origin+1,origin+2,origin+3].map(String);
+ a.snapshot.markets[0].orderFlow=null;
+ a.snapshot.volumeExperiment={version:'retired-volume-fixture'};
+ const result=aiEntryRuleDecision(a);
+ assert.equal(result.action,'buy');
+ assert.equal(result.entryPolicyVersion,'forecast-net-edge-v1');
+ assert.equal(result.entrySignalEngine,'kronos_ai');
+ assert.equal(result.model.usedForEntryDecision,true);
+});
 test('collector is Demo-only GET and does not turn upstream failure into healthy flow',async()=>{
  await assert.rejects(sampleOrderFlow({mode:'dry-run',pairs:[]}),/FLOW_DEMO_ONLY/);
  const calls=[];const fetchImpl=async(url,options)=>{calls.push({url,options});return {ok:true,text:async()=>JSON.stringify(url.endsWith('/time')?{serverTime:now}:url.includes('/depth')?{lastUpdateId:1,bids:proof().books[0].bids,asks:proof().books[0].asks}:proof().trades)};};
@@ -151,12 +190,12 @@ test('flow-only ignores absent/contrary model and opposing candle trends, but st
  a.snapshot.markets[0].orderFlow=null;assert.equal(orderFlowRuleDecision(a).action,'hold');
  }
 });
-test('futures AI assist requires Kronos direction agreement while spot flow remains independent',()=>{
+test('Demo AI assist requires Kronos direction agreement when enabled',()=>{
  const a=args(true),book=a.snapshot.markets[0].orderFlow.books[0];
  a.snapshot.aiAssist={version:'futures-kronos-flow-v1',enabled:true,scope:'futures-entry-direction-veto'};
  const quote={bid:String(Number(book.bids[0][0])-.001),ask:String(Number(book.asks[0][0])+.001)};
  const aligned=orderFlowRuleDecision({...a,quote});
- assert.equal(aligned.action,'open-short');assert.equal(aligned.aiAssist.version,'futures-kronos-flow-v1');
+ assert.equal(aligned.action,'open-short');assert.equal(aligned.aiAssist.version,'kronos-flow-v1');
  assert.equal(aligned.aiAssist.direction,'short');assert.equal(aligned.aiAssist.usedForEntryDecision,true);
  const opposite=structuredClone(a);
  const origin=Number(opposite.modelEvidence.prediction.forecasts[0].originClose);
@@ -165,4 +204,14 @@ test('futures AI assist requires Kronos direction agreement while spot flow rema
  assert.equal(veto.action,'hold');assert.ok(veto.directionChecks.find(c=>c.action==='open-short').reasons.includes('MODEL_DIRECTION_DISAGREES'));
  const missing=orderFlowRuleDecision({...a,modelEvidence:null,quote});
  assert.equal(missing.action,'hold');assert.ok(missing.directionChecks.find(c=>c.action==='open-short').reasons.includes('MODEL_EVIDENCE_UNAVAILABLE'));
+
+ const spot=args(false),spotBook=spot.snapshot.markets[0].orderFlow.books[0];
+ spot.snapshot.aiAssist={version:'kronos-flow-v1',enabled:true,scope:'spot-entry-direction-veto'};
+ const spotQuote={ask:String(Number(spotBook.asks[0][0])+.001),bid:String(Number(spotBook.bids[0][0])-.001)};
+ const spotAligned=orderFlowRuleDecision({...spot,quote:spotQuote});
+ assert.equal(spotAligned.action,'buy');assert.equal(spotAligned.aiAssist.version,'kronos-flow-v1');
+ const spotOpposite=structuredClone(spot),spotOrigin=Number(spotOpposite.modelEvidence.prediction.forecasts[0].originClose);
+ spotOpposite.modelEvidence.prediction.forecasts[0].forecastCloses=[spotOrigin-.01,spotOrigin-.02,spotOrigin-.03].map(String);
+ const spotVeto=orderFlowRuleDecision({...spotOpposite,quote:spotQuote});
+ assert.equal(spotVeto.action,'hold');assert.ok(spotVeto.directionChecks.find(c=>c.action==='buy').reasons.includes('MODEL_DIRECTION_DISAGREES'));
 });

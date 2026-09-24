@@ -62,12 +62,16 @@ test('freshly filled entry waits for verified native protection and refreshes ac
  assert.equal(calls,3);assert.equal(reads,2);assert.equal(result.generation,2);assert.equal(elapsed,1000);
 });
 
-test('unprotected timeout and unresolved or invalid protection never approve more orders',async()=>{
+test('unprotected timeout retries reconciliation but invalid protection never approves more orders',async()=>{
  let elapsed=0;
  await assert.rejects(waitForNativeEntryProtection({account:{},client:{snapshot:async()=>({})},policy:{mode:'demo'},
   check:async()=>{throw Error('NATIVE_PROTECTION_POSITION_UNPROTECTED');},now:()=>elapsed,pause:async ms=>{elapsed+=ms;}}),/NATIVE_ENTRY_PROTECTION_TIMEOUT/);
  assert.equal(elapsed,10000);
- for(const reason of ['NATIVE_PROTECTION_RECONCILIATION_REQUIRED','NATIVE_PROTECTION_ACTIVE_PROOF_INVALID','NATIVE_PROTECTION_READINESS_STALE']){
+ let transientElapsed=0,transientCalls=0;
+ const transient=await waitForNativeEntryProtection({account:{generation:0},client:{snapshot:async()=>({generation:++transientCalls})},policy:{mode:'demo'},
+  check:async()=>{if(++transientCalls<3)throw Error('NATIVE_PROTECTION_RECONCILIATION_REQUIRED');},now:()=>transientElapsed,pause:async ms=>{transientElapsed+=ms;}});
+ assert.equal(transient.generation,2);
+ for(const reason of ['NATIVE_PROTECTION_ACTIVE_PROOF_INVALID','NATIVE_PROTECTION_READINESS_STALE']){
   await assert.rejects(waitForNativeEntryProtection({account:{},policy:{mode:'demo'},check:async()=>{throw Error(reason);},pause:async()=>assert.fail('must not retry')}),new RegExp(reason));
  }
  const f=fixture();f.waitForProtection=async()=>{throw Error('NATIVE_ENTRY_PROTECTION_TIMEOUT');};
@@ -90,4 +94,13 @@ test('next selection starts only after protection; filtered entries do not wait'
  assert.equal(waits,3);assert.deepEqual(f.events,pairs.flatMap(p=>[p,'account','protected']));
  const rejected=fixture();rejected.executeFn=async()=>({status:'filtered'});rejected.waitForProtection=async()=>assert.fail('no filled entry');
  await runEntryBatch(rejected);
+});
+
+test('a later batch entry cannot reintroduce a Kev-vetoed pair or obtain a new review',async()=>{
+ const f=fixture();f.kevReview={enabled:true,approvedPairs:[pairs[0],pairs[2]]};
+ f.select=(s,p,a,m,{excludedPairs})=>({proposal:excludedPairs.includes(pairs[2])?{action:'hold'}:proposal(pairs[2])});
+ const execute=f.executeFn;
+ f.executeFn=async args=>{assert.equal(args.kevReview,f.kevReview);return execute(args);};
+ const result=await runEntryBatch(f);
+ assert.equal(result.submittedCount,2);assert.deepEqual(f.events,[pairs[0],'account',pairs[2],'account']);
 });

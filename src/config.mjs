@@ -8,7 +8,7 @@ export const PolicySchema = z.object({
  version:z.literal(1),mode:z.literal('dry-run'),
  pairs:z.array(z.string().regex(/^[A-Z0-9]+\/USDT$/)).min(1).max(10),
  maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(10),
- demoSpot:z.object({pairs:z.array(z.string().regex(/^[A-Z0-9]+\/USDT$/)).min(1).max(10).optional(),maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(10),
+ demoSpot:z.object({pairs:z.array(z.string().regex(/^[A-Z0-9]+\/USDT$/)).min(1).max(12).optional(),maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(10),
   maxEntriesPerDay:z.number().int().min(0).max(100),maxDailyLossUsdt:money}).strict().optional(),
  demoFutures:z.object({maxStakeUsdt:money,maxExposureUsdt:money,maxOpenTrades:z.number().int().min(1).max(2),
   maxNotionalUsdt:money,maxTotalNotionalUsdt:money,maxLeverage:z.number().int().min(1).max(3),
@@ -27,9 +27,14 @@ export function validatePolicy(input) {
  return p;
 }
 export async function loadPolicy(mode='dry-run') { return modePolicy(validatePolicy(await readJson(join(ROOT,'config/policy.json'))),mode); }
+const KevConfirmationSchema=z.object({version:z.literal('kev-two-window-v1'),mode:z.enum(['demo','demo-futures']),pair:z.string().min(1),
+ action:z.enum(['buy','open-long','open-short']),snapshotId:z.string().uuid(),boundary:z.number().int().positive(),
+ previousBoundary:z.number().int().nonnegative(),intervalMs:z.number().int().positive(),count:z.number().int().min(2),
+ confirmed:z.literal(true),firstBoundary:z.number().int().positive(),updatedAt:z.string().min(1)}).strict();
 export const ProposalSchema = z.object({
  action:z.enum(['hold','buy','sell']),pair:z.string(),stakeUsdt:z.string().regex(/^\d+(\.\d{1,8})?$/),
- snapshotId:z.string().uuid(),evidenceIds:z.array(z.string()).max(10),reason:z.string().min(1).max(1500)
+ snapshotId:z.string().uuid(),evidenceIds:z.array(z.string()).max(10),reason:z.string().min(1).max(1500),
+ kevConfirmation:KevConfirmationSchema.optional()
 }).strict();
 
 export const HighFrequencyControlSchema=z.object({

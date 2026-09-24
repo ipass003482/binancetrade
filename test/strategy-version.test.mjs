@@ -16,6 +16,31 @@ async function copySources(version){
  for(const file of version.sources){await mkdir(dirname(join(root,file.path)),{recursive:true});await copyFile(join(ROOT,file.path),join(root,file.path));}
  return root;
 }
+
+test('effective Kev market-data config defaults to a source-attested candle-free execution authority',async()=>{
+ for(const mode of ['demo','demo-futures']){
+  const args={policy:{mode},analyst:{version:1,style:'active'}},base=await captureStrategyVersion(args),root=await copySources(base);
+  assert.equal(base.executionScope.entryPolicyVersion,'kev-order-flow-v1');
+  assert.equal(base.entryAuthority.role,'pair_and_direction_or_hold');assert.equal(base.entryAuthority.kronosInput,false);
+  assert.equal(base.entryAuthority.candleInput,false);assert.equal(base.observerProvenance.usedForEntryDecision,false);
+  assert.deepEqual(base.executionScope.excludedObserverSources,observerFiles);
+  assert.ok(base.sources.some(s=>s.path==='src/kev-flow.mjs'));
+  assert.ok(observerFiles.every(path=>!base.sources.some(s=>s.path===path)));
+  for(const file of observerFiles){const path=join(root,file);await mkdir(dirname(path),{recursive:true});await writeFile(path,'unavailable detached observer');}
+  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  await appendFile(join(root,'src/kev-flow.mjs'),'\n// changed fixed plan');
+  assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  await copyFile(join(ROOT,'src/kev-flow.mjs'),join(root,'src/kev-flow.mjs'));
+  await appendFile(join(root,'src/kev-execution-price.mjs'),'\n// changed approval quote guard');
+  assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  await copyFile(join(ROOT,'src/kev-execution-price.mjs'),join(root,'src/kev-execution-price.mjs'));
+  const config=JSON.parse(await readFile(join(root,'config/kev-entry.json'),'utf8'));config.marketData='kronos';
+  await writeJson(join(root,'config/kev-entry.json'),config);
+  const legacy=await captureStrategyVersion({...args,root});
+  assert.equal(legacy.executionScope.entryPolicyVersion,'forecast-net-edge-v1');assert.equal(legacy.entryAuthority,undefined);
+  assert.ok(observerFiles.every(path=>legacy.sources.some(s=>s.path===path)));
+ }
+});
 test('version is stable across time, excludes auth, changes with source/policy/observed exits',async()=>{
  const f=await fixture(),engine={...engineConfig(f.policy),password:'never-persist-this',minimal_roi:{'0':.03}};
  const base=await captureStrategyVersion({policy:f.policy,engine,now:f.now});
@@ -44,41 +69,28 @@ test('attribution requires exact tag, snapshot, intact manifest, and entry-time 
  assert.deepEqual((await readTradeVersions(local,[trade],[record],'dry-run')).versions,{});
 });
 
-test('flow execution survives missing, malformed, changed and stopped observer evidence in both Demo modes',async()=>{
+test('AI entry execution survives missing, malformed, changed and stopped observer evidence in both Demo modes',async()=>{
  for(const mode of ['demo','demo-futures']){
-  const args={policy:{mode},analyst:{version:1,style:'active'}},base=await captureStrategyVersion(args),root=await copySources(base);
-  const futures=mode==='demo-futures';
-  if(futures) assert.deepEqual(base.executionScope.attachedObserverSources,observerFiles);
-  else assert.deepEqual(base.executionScope.excludedObserverSources,observerFiles);
-  assert.equal(base.executionScope.entryPolicyVersion,'order-flow-only-v1');
-  if(futures){
-   assert.equal(base.observerProvenance.status,'attached');
-   assert.equal(base.observerProvenance.modelPinVerified,true);
-   assert.equal(base.observerProvenance.usedForEntryDecision,true);
-   assert.equal(base.observerProvenance.verificationOwner,'src/model-entry.mjs');
-   assert.ok(observerFiles.every(path=>base.sources.some(source=>source.path===path)));
-   // Futures direction-assist sources are source-attested and match the copied manifest.
-   assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
-  }else{
-   assert.equal(base.observerProvenance.status,'not_collected');
-   assert.equal(base.observerProvenance.modelPinVerified,false);
-   assert.equal(base.observerProvenance.usedForEntryDecision,false);
-   assert.equal(base.observerProvenance.verificationOwner,'src/model-watchdog.mjs');
-   assert.ok(observerFiles.every(path=>!base.sources.some(source=>source.path===path)));
-   // The fixture has every execution source, but none of the observer sources.
-   assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
-  }
+  const args={policy:{mode},analyst:{version:1,style:'active'},entryPolicyVersion:'forecast-net-edge-v1'},base=await captureStrategyVersion(args),root=await copySources(base);
+  const modelAssist=true;
+  assert.deepEqual(base.executionScope.attachedObserverSources,observerFiles);
+  assert.equal(base.executionScope.entryPolicyVersion,'forecast-net-edge-v1');
+  assert.equal(modelAssist,true);
+  assert.equal(base.observerProvenance.status,'attached');
+  assert.equal(base.observerProvenance.modelPinVerified,true);
+  assert.equal(base.observerProvenance.usedForEntryDecision,true);
+  assert.equal(base.observerProvenance.verificationOwner,'src/model-entry.mjs');
+  assert.ok(observerFiles.every(path=>base.sources.some(source=>source.path===path)));
+  // Direction-assist sources are source-attested and match the copied manifest.
+  assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
   for(const file of [...observerFiles,'local/model-research/loaded-model.json','local/model-research/STOP']){
    const path=join(root,file);await mkdir(dirname(path),{recursive:true});await writeFile(path,'invalid observer evidence');
   }
-  if(futures) assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
-  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
   await appendFile(join(root,'config/model-execution.json'),'\nchanged observer pin');
-  if(futures) assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
-  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  assert.notEqual((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
   await unlink(join(root,'config/model-execution.json'));
-  if(futures) await assert.rejects(captureStrategyVersion({...args,root}),{code:'ENOENT'});
-  else assert.equal((await captureStrategyVersion({...args,root})).fingerprint,base.fingerprint);
+  await assert.rejects(captureStrategyVersion({...args,root}),{code:'ENOENT'});
  }
 });
 

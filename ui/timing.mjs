@@ -6,6 +6,18 @@ export function timingView({data,market,preview,error,elapsedMs=0}){
  const t=data?.timing,age=Number.isFinite(elapsedMs)&&elapsedMs>=0?elapsedMs:Infinity;
  const good=!!t&&!t.clockError&&Number.isFinite(t.serverNow)&&age<=45000&&!error;
  const current=good?t.serverNow+age:NaN,last=market?.candles?.at(-1),close=Number.isSafeInteger(last?.closeTime)?last.closeTime+1:NaN;
+ if(t?.entryPolicyVersion==='kev-order-flow-v1'||data?.strategy?.entryPolicyVersion==='kev-order-flow-v1'){
+  const at=market?.orderFlow?.books?.at(-1)?.at,flowAge=current-at,next=Date.parse(t?.nextResearchAt),
+   expiry=Date.parse(t?.latestResearch?.signalExpiresAt),fresh=good&&Number.isSafeInteger(at)&&flowAge>=0&&flowAge<=30000,
+   failed=['failed','aborted'].includes(t?.stage),phase=t?.stopped?'已暫停':t?.watchRunning?'每 1 分鐘 Kev 訂單流決策':'排程未啟動';
+  return {status:!good?'時間資料不可用或已過期 · '+phase:fresh?'時間與訂單簿已校驗 · '+phase:'訂單簿資料待更新 · '+phase,
+   tone:fresh?'ok':'warning',clock:good?'交易所－本機 '+Math.round(t.clock.offsetMs)+' ms（±'+Math.ceil(t.clock.uncertaintyMs)+' ms）':t?.clockError??'等待校驗',
+   lastClose:time(at),delay:fresh?'訂單簿 '+seconds(flowAge)+' 秒前':Number.isFinite(flowAge)&&flowAge>=0?'訂單簿已過期':'尚無有效訂單簿',
+   nextCandle:'不使用 K 線',
+   nextResearch:t?.stopped?'已暫停，不會啟動':!t?.watchRunning?'排程未啟動':!good?'等待時間校驗':Number.isFinite(next)&&next>current?time(next)+'（'+seconds(next-current)+' 秒）':'本輪執行中',
+   expiry:t?.stopped?'已暫停 · 不可進場':failed?'本輪失敗 · 不可進場':t?.latestResearch?.consumed?'本輪已處理':!good?'無法核對':
+    t?.watchRunning&&expiry>current?time(expiry)+'（剩 '+seconds(expiry-current)+' 秒）':Number.isFinite(expiry)?'已過期／未運行':'尚無決策訊號'};
+ }
  const boundary=Math.floor(current/ms)*ms,missing=Number.isFinite(close)&&Number.isFinite(boundary)?boundary-close:NaN;
  const phase=t?.stopped?'已暫停':t?.watchRunning?(t.decisionIntervalMs===60000?'每 1 分鐘判斷 · 5m K 線':'排程運行中'):'排程未啟動';
  const next=Date.parse(t?.nextResearchAt),expiry=Date.parse(t?.latestResearch?.signalExpiresAt);

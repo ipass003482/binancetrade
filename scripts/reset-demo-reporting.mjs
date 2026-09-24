@@ -112,16 +112,18 @@ const goal = {
   deadline,
   timezone: 'Asia/Taipei',
   ruleVersion: 'kronos-direction-v12',
-  entryPolicyVersion: 'order-flow-only-v1',
-  modelFingerprint: null,
+  entryPolicyVersion: 'forecast-net-edge-v1',
+  modelFingerprint: (await readJson(join(ROOT, 'config', 'model-execution.json'))).modelFingerprint,
   modelAssist: {
-    version: 'futures-kronos-flow-v1',
-    mode: 'demo-futures',
-    role: 'advisory direction veto',
+    required: true,
+    version: 'kronos-flow-v1',
+    modes: MODES,
+    role: 'entry direction authority',
     model: 'kronos-small-pretrained-v1',
     modelFingerprint: (await readJson(join(ROOT, 'config', 'model-execution.json'))).modelFingerprint,
     usedForEntryDecision: true,
-    note: 'Only futures entries in this goal use the pinned forecast as a direction veto. Spot remains order-flow-only; native flow, cost, risk and protection remain authoritative.'
+    entrySignalEngine: 'kronos_ai',
+    note: 'Both Spot and Futures entries in this goal require the pinned three-step forecast to agree with its origin direction. Cost, ATR, risk and native protection remain authoritative; order flow is retained for research only.'
   },
   target: { scope: 'combined', count: 100 },
   modes: Object.fromEntries(MODES.map(mode => [mode, {

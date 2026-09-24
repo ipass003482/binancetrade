@@ -28,10 +28,21 @@ import { collectCosts } from './trading-costs.mjs';
 import { beginForwardTrial,refreshForwardReport } from './forward-store.mjs';
 import { FLOW_ONLY_PARAMETERS as DEMO_PARAMETERS,DEMO_RULE_VERSION } from './demo-rules.mjs';
 import { refreshPortfolio } from './portfolio-store.mjs';
+import { loadKevEntryConfig } from './kev-entry.mjs';
 const out=x=>console.log(JSON.stringify(x,null,2));
 const parsed=modeArgs(process.argv.slice(2)),mode=parsed.mode,LOCAL=modeLocal(mode);
 const [command,...args]=parsed.args;
 function count(n){if(args.length!==n)throw new Error('INVALID_ARGUMENTS: run help');}
+export function watchDecisionSettings(selectedMode,kevConfig){
+ if(selectedMode==='dry-run')return {};
+ if(!['demo','demo-futures'].includes(selectedMode))throw Error('MODE_REJECTED');
+ const settings={decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,decisionIntervalMs:FLOW_DECISION_INTERVAL_MS};
+ if(kevConfig?.marketData!=='order-flow')return settings;
+ if(kevConfig.enabled!==true||kevConfig.decisionMode!=='autonomous')throw Error('KEV_ORDER_FLOW_ACTIVATION_REQUIRED');
+ const route={entryPolicyVersion:'kev-order-flow-v1'};
+ return {...settings,...route,timeframe:'order-flow',entryDecisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,
+  entryDecisionIntervalMs:FLOW_DECISION_INTERVAL_MS,collectionDelayMs:closeBufferMs(selectedMode,route)};
+}
 async function client(){return new FreqtradeClient(await loadPolicy(mode),await readJson(join(LOCAL,'api-auth.json')));}
 async function saveResearch(){
  const snapshot=await collect(await loadPolicy(mode)),file=join(LOCAL,'runs',snapshot.id+'.snapshot.json');
@@ -68,11 +79,11 @@ async function doctor(){
 async function watch(){
  if(await exists(join(LOCAL,'TRADING_DISABLED')))return {status:'trading_disabled',message:'本機交易已停用；未啟動研究排程或進場流程。'};
  return lock(join(LOCAL,'watch.lock'),async()=>{
+  const schedule=watchDecisionSettings(mode,mode==='dry-run'?null:await loadKevEntryConfig({local:LOCAL,mode}));
   // One startup marker records the user's requested continuous operation.
   // STOP pauses this entry watcher, while the separate engine supervisor can
   // still maintain exits. Heartbeats and shutdown must not reset this marker.
-  await writeJson(join(LOCAL,'continuous.json'),{enabled:true,updatedAt:new Date().toISOString(),
-   ...(mode==='dry-run'?{}:{decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,decisionIntervalMs:FLOW_DECISION_INTERVAL_MS})});
+  await writeJson(join(LOCAL,'continuous.json'),{enabled:true,updatedAt:new Date().toISOString(),...schedule});
   const forwardClient=mode==='dry-run'?null:await client();
   if(forwardClient)await beginForwardTrial(LOCAL,mode,await forwardClient.history(),{ruleVersion:DEMO_RULE_VERSION,parameters:DEMO_PARAMETERS});
   const abort=new AbortController(),stop=()=>abort.abort();
@@ -101,15 +112,15 @@ async function watch(){
   try{
    while(!abort.signal.aborted){
     if(await exists(join(LOCAL,'STOP'))){out({status:'stopped'});break;}
-    let boundary;const closeBuffer=closeBufferMs(mode);
+    let boundary;const closeBuffer=closeBufferMs(mode,schedule);
     if(mode!=='dry-run'){
-     boundary=nextDecisionBoundary(Date.now(),await lastDecisionClaim(LOCAL),mode);
+     boundary=nextDecisionBoundary(Date.now(),await lastDecisionClaim(LOCAL),mode,schedule);
      await healthUpdate(LOCAL,{stage:'waiting_decision',nextResearchAt:new Date(boundary+closeBuffer).toISOString()});
      while(Date.now()<boundary+closeBuffer&&!abort.signal.aborted&&!await exists(join(LOCAL,'STOP'))){
       try{await delay(Math.min(1000,boundary+closeBuffer-Date.now()),null,{signal:abort.signal});}catch{break;}
      }
      if(abort.signal.aborted||await exists(join(LOCAL,'STOP')))break;
-     if(!await claimDecisionBoundary(LOCAL,boundary,Date.now(),mode))continue;
+     if(!await claimDecisionBoundary(LOCAL,boundary,Date.now(),mode,schedule))continue;
     }
     try{out(await cycle(abort.signal,boundary));}
     catch(e){out({status:'cycle_failed',error:safeError(e)});}

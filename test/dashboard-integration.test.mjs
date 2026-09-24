@@ -37,6 +37,7 @@ test('dashboard reuses one account snapshot and exposes missing continuous watch
   exposure:{asOf:iso(1000),grossUsdt:'25',estimatedOpenRiskUsdt:'0.5',allocatedMarginUsdt:'25',secret:'DO_NOT_EXPOSE'},warnings:[],secret:'DO_NOT_EXPOSE'});
  await writeJson(join(supervisorLocal,'status.json'),{pid:process.pid,observedAt:iso(1000),states:[{mode:'demo',action:'observe',reason:'RUNNING',secret:'DO_NOT_EXPOSE'}],secret:'DO_NOT_EXPOSE'});
  const state=await dashboardState('demo',{local,policy,client,session:null,getTiming:async()=>null,
+  getKevConfig:async()=>({marketData:'kronos',enabled:false}),
   getDecision:async()=>({demoEngine:'rules',ruleVersion:DEMO_RULE_VERSION}),now:()=>now,portfolioLocal,supervisorLocal,localFor:mode=>join(base,mode)});
  assert.equal(reads,1);assert.equal(state.operations.engineAvailable,true);assert.equal(state.operations.watchRunning,false);
  assert.equal(state.operations.healthy,false);assert.ok(state.operations.problems.includes('CONTINUOUS_WATCH_NOT_RUNNING'));
@@ -105,7 +106,7 @@ test('session dashboard hides old artifact aggregates and uses snapshot time for
  await writeJson(join(local,'equity-summary.json'),{firstObservedAt:iso(60001),observedAt:iso(1000),changeSinceFirstUsdt:'100'});
  await writeJson(join(local,'forward-report.json'),{startedAt:iso(60001),asOf:iso(1000),netRealizedUsdt:'100'});
  await writeJson(join(portfolioLocal,'report.json'),{schemaVersion:1,source:'freqtrade-demo-portfolio',startedAt:iso(60001),asOf:iso(1000),evidenceComplete:true,netPnlUsdt:'100'});
- const args={session,local,policy:{...f.policy,mode:'demo'},client,getTiming:async()=>null,getDecision:async()=>({ruleVersion:DEMO_RULE_VERSION}),now:()=>now,portfolioLocal,supervisorLocal,localFor:mode=>join(base,mode)};
+ const args={session,local,policy:{...f.policy,mode:'demo'},client,getTiming:async()=>null,getKevConfig:async()=>({marketData:'kronos',enabled:false}),getDecision:async()=>({ruleVersion:DEMO_RULE_VERSION}),now:()=>now,portfolioLocal,supervisorLocal,localFor:mode=>join(base,mode)};
  const d=await dashboardState('demo',args);assert.deepEqual(d.session,session);assert.equal(d.equity,null);assert.equal(d.forward,null);assert.equal(d.portfolio,null);
  assert.deepEqual(d.decisions.map(x=>x.reason),['new']);assert.equal(d.decisions[0].at,iso(50000));
  assert.equal(d.diagnostics.cycles.total,1);assert.equal(d.diagnostics.window.from,session.startedAt);

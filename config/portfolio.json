@@ -1,8 +1,8 @@
 {
   "version": 1,
   "capitalUsdt": "2000",
-  "maxGrossExposureUsdt": "1050",
-  "maxOpenRiskUsdt": "4",
+  "maxGrossExposureUsdt": "400",
+  "maxOpenRiskUsdt": "10",
   "maxDailyLossUsdt": "50",
   "maxDrawdownUsdt": "100",
   "maxSnapshotAgeSeconds": 15,

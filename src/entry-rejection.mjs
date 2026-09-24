@@ -20,7 +20,7 @@ export async function readEntryRejection({local,plan,attempt,now=Date.now()}){
    ||receipt.mode!==attempt.mode||receipt.mode!==plan.nativeEntryGuard?.mode
    ||receipt.decisionBoundary!==(plan.decisionBoundary??plan.nativeEntryGuard?.candleBoundary)
    ||receipt.nativeEntryGuardVersion!==plan.nativeEntryGuard?.version
-   ||!['kronos-native-entry-v10','kronos-native-entry-v11','kronos-native-entry-v12'].includes(receipt.nativeEntryGuardVersion)
+   ||!['kronos-native-entry-v10','kronos-native-entry-v11','kronos-native-entry-v12','kev-native-entry-v1'].includes(receipt.nativeEntryGuardVersion)
    ||receipt.planCreatedAt!==plan.createdAt||receipt.planSha256!==attempt.planSha256
    ||receipt.processId!==attempt.processId
    ||!Number.isFinite(createdAt)||createdAt>attempt.startedAt

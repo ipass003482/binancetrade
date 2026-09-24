@@ -1,4 +1,195 @@
-# 2026-09-16 13:56 fast volatility sizing — latest authority
+# 2026-09-22 Multi-agent loss audit — current execution amendment
+
+# 2026-09-22 Kev Demo reporting cohort — current goal
+
+The user requested a fresh 100-entry observation round after the prior goal
+closed at 84/100. The active reporting goal is
+`local/trade-goals/2026-09-22-kev-demo-100-reset-20260922050238/goal.json`,
+started `2026-09-22T05:02:38.831Z` (13:02:38 Asia/Taipei) and ending
+`2026-09-23T05:02:38.831Z`. It is a combined Spot + Futures target of 100,
+using `kev-order-flow-v1` and requiring the current Kev/Codex approval record.
+The verified initial count is 0/100, Spot 0 and Futures 0. Existing Spot IDs
+1–311 and Futures IDs 1–76 are baseline exclusions; the previous goal, all
+exchange history, journals, losses, and execution session
+`3918fa60-59d6-413c-af06-ff62919dddc8` remain preserved. This is a reporting
+scope change only: no order was submitted and no strategy, model, risk, or
+protection setting was reset. The hourly report automation must read
+`active.json` dynamically rather than hard-code this goal's dates.
+
+The user requested identifying and fixing the Demo losses with multiple agents.
+Independent trade and SQLite reconciliation found 84 closed entries, net
+-8.12596627 USDT. Using actual filled-order weighted prices, the gross price
+component was +2.94440910; price-to-net drag was 11.07037537. Fee-rate equivalents
+explain the drag within rounding precision. Cost accounting
+and native stop/time/net-trailing exits were not found broken. Balanced decisions
+remain valid HOLDs when evidence cannot support a fee-adjusted opportunity.
+
+Fix the reproduced approval-price anchor gap: every Kev execution boundary must
+use the same original snapshot/review quote, with one absolute drift budget
+derived from the existing per-side slippage, policy, stop and remaining net target
+space. Never replenish that budget at the bridge or native callback. This limits
+decision quote drift; it does not guarantee a market-order fill price or profit.
+Native exits, historical plans, Demo-only routing, model, risk limits, session,
+goal and full losses remain intact. Do not change thresholds to fit 84 outcomes.
+
+Read docs/kev-loss-audit-2026-09-22.md. Deployment evidence belongs under
+local/kev-loss-fix-2026-09-22/; require tests and fresh-cycle native reload proof
+before claiming activation. scripts/kev-loss-review.mjs is a read-only audit.
+
+# 2026-09-21 Kev fee-aware review — retained execution amendment
+
+The user approved withdrawing the aggressive entry preference and requested
+correct cost accounting. Kev remains autonomous on order flow, now balanced.
+Each candidate includes executableCostEconomics from src/trading-costs.mjs:
+normalized 100 USDT entry notional, side-specific fees, two-sided slippage,
+reserved funding, break-even exit quote, buffer exit quote and net exit scenarios.
+Spot budgets an undiscounted BUY fee in received base and SELL fee in quote;
+no unverified BNB discount. Executable ask-to-bid / bid-to-ask scenarios include
+the spread once. Existing conservative spread-inclusive risk costs remain.
+The prompt must allow HOLD when a cost-adjusted case is weak or missing; a
+fixed target is not a return forecast or evidence of positive expected profit.
+
+Native Kev entry validation independently recomputes costs from cost facts,
+the persisted fresh execution quote and config/costs.json at all three entry
+boundaries. Missing, stale, inconsistent or understated costs reject entries.
+This hardening does not show prior realized PnL was misreported or guarantee
+profitability. Existing exit plans, stops, risk budgets, session, full historical
+losses and active 100-entry goal are preserved. No flow-exit change is included.
+Deployment evidence: local/kev-net-cost-2026-09-21/; require completed tests,
+native reload and new-cycle proof before claiming activation.
+
+# 2026-09-21 Kev order-flow authority — supersedes Kline/Kronos entries
+
+The user explicitly rejected the five-minute Kline path and requested Kev to
+select pairs and sides directly from order flow. The active configuration uses
+marketData=order-flow, decisionMode=autonomous, policy/rule kev-order-flow-v1.
+Collection and execution quote retrieval use no candle, ATR or forecast data.
+All data-valid/cost/risk-eligible whitelist pairs are offered; Futures offers
+both sides. Kev chooses one pair/action or HOLD. No deterministic direction
+threshold, Kronos candidate gate or first-five-minute-candle gate remains on
+this route. Missing/expired/mismatched decisions still block entries.
+
+Raw depth is sampled every 10 seconds; three five-level books and a rolling
+60-second trade tape feed one bounded Codex request per minute. Spot starts
+at second 5 and Futures at second 30 to share the single CLI worker. This is
+minute-scale sampled order-flow trading, not millisecond/event-feed HFT.
+Native engine timeframe metadata remains for compatibility with historical
+positions; it is not an input or entry gate of the Kev contract.
+
+New fixed exits: stop 0.5%, target 1.5% (3:1 gross planned geometry), maximum
+900 seconds, original net-profit trailing, maximum 1 USDT estimated stress
+risk including full fees and native reserve. The target is a fixed experiment,
+not a return forecast; reject if costs or net reward/risk do not fit. Do not
+change target per candidate to manufacture eligibility. Actual spot costs of
+roughly 30-34bps were checked before choosing this geometry. Native guard
+kev-native-entry-v1 verifies exact persisted review bytes, selection, raw proof,
+snapshot, costs, clocks, risk and one-use intent at callback/context/wire.
+No live, UTA, OpenAlice or automatic commits/pushes are authorized.
+
+Existing plans, stops, histories, execution session and active 100-entry goal
+are preserved. A prospective kev-order-flow-amendment.json binds the existing
+goal hash and deployment time; older entries retain their original attribution.
+Operational evidence: local/kev-order-flow-2026-09-21/; source authority mirrored
+in local/adaptive-minute-2026-09-16/. Read plans/current-v12.md and
+docs/kev-order-flow-2026-09-21.md. Older sections below are historical.
+
+# 2026-09-21 Kev autonomous selection + minute cadence — historical execution authority
+
+The user authorized the Demo test machine to let Kev choose how an eligible
+entry is handled and help select the candidate. `config/kev-entry.json` and both
+per-mode activation files now use `decisionMode: autonomous`. For each snapshot
+with any native-eligible candidate, one bounded Codex CLI request receives the
+complete candidate pool—even when the deterministic ranker currently shows
+HOLD—and chooses at most one existing Kronos candidate or HOLD. Kev cannot
+invent a pair or direction, reverse the pinned direction, change price, size,
+leverage, stop, target or time, bypass quote/cost/risk/clock/protection checks,
+or submit an order. The bridge and native engines remain the execution and
+protection authorities; native exits never wait for Kev.
+
+The high-frequency component is the existing `flow-minute-v1` Demo cadence:
+fresh observation every 60 seconds, with model entry windows still constrained
+to the complete 5m candle's first minute by the native guard. This is the
+fastest safe cadence for the Codex CLI path; it is not a 300ms block-level
+executor. No live, UTA or OpenAlice configuration changed and no native engine
+was restarted. Deployment evidence is `local/kev-autonomous-2026-09-21/`, with
+the operational source authority mirrored in
+`local/adaptive-minute-2026-09-16/`. The active 100-entry reporting goal and
+existing positions/history remain intact; future receipts carry
+`decisionMode: autonomous` so the cohort can be evaluated by actual fills.
+
+# 2026-09-21 Kev-only 100-entry reporting cohort — current goal authority
+
+The user explicitly requested recounting 100 entries from Kev activation. The
+active reporting goal is now local/trade-goals/2026-09-21-kev-demo-100-20260921060503/goal.json,
+starting 2026-09-21T06:05:03.356Z (Taiwan 14:05:03), combined 100 actual entries.
+It includes the original Kev-approved Spot UNI/USDT trade 247 as entry 1;
+Spot IDs 1-246 and Futures IDs 1-57 are count baselines only. The original
+approval, entry plan, journal and actual fill were verified. Existing positions,
+history, losses, execution session and running services were not reset or closed.
+The new goal follows the existing reset convention of a 24-hour observation
+window, ending 2026-09-22T06:05:03.356Z. The prior goal and its deadline are archived
+unchanged. Missing a deadline never authorizes changing it or manufacturing fills.
+
+Hourly reports must follow active.json and the entire current entry cohort,
+including across midnight, with actual fill and original Kev approval evidence.
+The today-pnl endpoint alone is day-scoped and must not replace cumulative goal
+accounting. Initial verified state was 1/100 at 2026-09-21T06:26:44.671Z; this is
+historical evidence, not a current-count claim. Read the goal's pre-reset.json,
+initial-review.json and reset-verification.json. All trading safety and model
+authority in the next section remains in force. No runtime source was changed.
+
+# 2026-09-21 Kev/Codex Demo entry approval — current execution authority
+
+The user explicitly requested adding the running Kev-format Codex CLI service to
+orders. Both Demo modes now require kev-codex-entry-v1 approval of existing
+Kronos-eligible candidates, activated by local/<mode>/kev-entry.json. The model
+remains gpt-6-astra through the local API on 127.0.0.1:8009; no Kev weights load.
+No candidate means no CLI call. Up to eight candidates share one bounded request.
+Unknown, unavailable, declined, tied or expired approval means HOLD, without retry
+or a fallback entry. Approval binds the snapshot, mode, pair, direction and config.
+Its expiry matches the existing native first-minute model deadline. Bridge checks
+before quote and before send; native model/cost/risk/clock/protection checks remain.
+Native exits and old plans never depend on the added reviewer. No risk, cost,
+position, leverage or entry-count limits were relaxed. This is not profit evidence.
+
+Read docs/kev-entry-2026-09-21.md and local/kev-entry-2026-09-21/ for deployment
+and verification. Current operational source manifests are also mirrored under
+local/adaptive-minute-2026-09-16/. The source checker permits only the two named
+activation JSON files under local, never local credentials. The execution session,
+historical losses and Kronos model pin remain unchanged; the reporting goal was
+subsequently replaced by the user-authorized Kev cohort above. Demo only;
+no live/UTA, automatic commits or pushes. The sole plan remains plans/current-v12.md.
+
+# 2026-09-20 AI entry repair and model comparison — retained authority
+
+The user requested multiple-agent evaluation, then explicitly said "做啊" to
+implement it. Both Demo modes now use the existing pinned Kronos forecast as
+entry direction authority, subject to all native quote, cost, ATR, clock, risk,
+cooldown and protection checks. Older flow-only / futures-veto descriptions below
+are historical. The sole current plan remains plans/current-v12.md.
+
+The AI bridge no longer adds flow minute-cadence fields rejected by the model
+native guard. Observation still runs each minute, while AI entry evaluation runs
+only in the first minute after a complete 5m candle. Other minutes record
+MODEL_NEXT_CANDLE_WAIT without waiting for an impossible new prediction. The
+60-second native deadline and exact snapshot binding remain enforced.
+
+New AI plans use a fixed maximum 1 USDT estimated stress-risk budget, 2 ATR target,
+1 ATR stop capped at 2%, native profit protection and a four-hour time exit.
+Historical flow adaptive sizing and flow exits do not apply to new AI plans;
+existing positions retain their entry-time plans. Fees and costs are mandatory.
+No research result is permission to relax guards or manufacture fills.
+
+Deployment evidence is local/ai-entry-repair-2026-09-20/. The original session,
+combined 100-entry goal, journals and model pin are preserved. Trading remains
+Demo only; no live/UTA/OpenAlice configuration changes and no automatic commits.
+Independent shadow v2 and local/model-comparison/ are research only. They cannot
+promote a model or send orders. Missing costs/labels remain unknown; quote
+markouts and cost scenarios are not realized PnL. The model comparison currently
+has insufficient independent evidence to select a replacement. Read
+docs/model-comparison.md for its conditional coverage and fixed-time replay.
+
+# 2026-09-16 13:56 fast volatility sizing — historical authority
 User explicitly requested implementation, superseding observe-only ATR notes.
 live-flow-adaptive-v2/native guardv12 is deployed; Demo resumed13:56 and UNIspot#8
 truly filled13:57 onv2. See docs/demo-fast-atr-2026-09-16.md.

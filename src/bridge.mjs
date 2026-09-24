@@ -1,11 +1,12 @@
 import {assessOrderFlow,assessFuturesFlowContinuation,FLOW_ONLY_POLICY,FLOW_SELECTIVITY} from './order-flow.mjs';
 import {createHash} from 'node:crypto';
+import {readFile} from 'node:fs/promises';
 import { isEntry,isExit, isFutures } from './mode.mjs';
 import { join } from 'node:path';
 import {entryId,entryArtifactStem,BATCH_EXECUTION_VERSION} from './entry-identity.mjs';
 import Decimal from 'decimal.js';
 import { assess } from './risk.mjs';
-import { market } from './research.mjs';
+import { market,marketOrderFlow } from './research.mjs';
 import { proposalSchema } from './config.mjs';
 import { lock,journalRead,journalAppend,exists,writeJson } from './io.mjs';
 import { loadAnalyst } from './analyst.mjs';
@@ -16,6 +17,7 @@ import { verifyEntryTiming,decisionTiming } from './entry-timing.mjs';
 import { entryCost,loadCosts } from './trading-costs.mjs';
 import { loadDecisionConfig,RULE_ENGINE_VERSION } from './decision.mjs';
 import { orderFlowRuleDecision,evaluateFlowEntryQuality,demoRiskStake,riskCostFraction,DEMO_RULE_VERSION,DEMO_RISK_BUDGET_USDT,DEMO_PROFIT_PROTECTION } from './demo-rules.mjs';
+import {MODEL_ENTRY_POLICY} from './model-momentum.mjs';
 import { checkDemoOrderSize } from './demo-order-size.mjs';
 import {demoRiskPolicy} from './demo-risk.mjs';
 import { validateProbePermit,PROBE_VERSION } from './demo-probe.mjs';
@@ -23,9 +25,14 @@ import { withPortfolioEntry } from './portfolio-store.mjs';
 import { assertNativeProtection,NATIVE_ENTRY_GUARD_VERSION } from './protection.mjs';
 import {loadVolumeExperiment,assertVolumeAssignment} from './volume-experiment.mjs';
 import {entryPlanDigest,readEntryRejection} from './entry-rejection.mjs';
+import {loadKevEntryConfig,kevEntryRejection,kevEntryReceipt} from './kev-entry.mjs';
+import {isKevFlow,KEV_FLOW_POLICY,KEV_NATIVE_VERSION,kevFlowRule,kevFlowStake,kevFlowQuality} from './kev-flow.mjs';
+import {assessKevExecutionPrice} from './kev-execution-price.mjs';
+import {confirmationForEntry} from './kev-confirmation.mjs';
 export async function execute({proposal,snapshot,policy,client,local,modelEvidence,now=()=>Date.now(),getQuote=market,
- strategyVersion,executionPolicyVersion,entryQualityFn=evaluateEntryQuality,getClock=readExchangeClock,getDecisionConfig=loadDecisionConfig,getVolumeConfig=loadVolumeExperiment,probePermitId,portfolioEntryFn=withPortfolioEntry,protectionCheckFn=assertNativeProtection}) {
+ strategyVersion,executionPolicyVersion,entryQualityFn=evaluateEntryQuality,getClock=readExchangeClock,getDecisionConfig=loadDecisionConfig,getVolumeConfig=loadVolumeExperiment,probePermitId,portfolioEntryFn=withPortfolioEntry,protectionCheckFn=assertNativeProtection,kevReview}) {
  if(executionPolicyVersion!==undefined&&(executionPolicyVersion!==BATCH_EXECUTION_VERSION||!['demo','demo-futures'].includes(policy.mode)||!isEntry(proposal.action)||probePermitId))throw Error('BATCH_EXECUTION_MODE_REJECTED');
+ const kevFlow=isKevFlow(snapshot);
  const artifactStem=entryArtifactStem(snapshot.id,proposal.pair,executionPolicyVersion);
  const run=portfolioCheck=>lock(join(local,'execution.lock'),async()=>{
   const journal=join(local,'orders.jsonl'), records=await journalRead(journal);
@@ -34,6 +41,16 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
   const latest=new Map(records.map(r=>[r.id,r]));
   if([...latest.values()].some(r=>['pending','unknown'].includes(r.status))) throw new Error('UNRESOLVED_SUBMISSION: reconcile before more orders');
   proposalSchema(policy).parse(proposal);
+  const kevConfig=!probePermitId&&policy.mode!=='dry-run'&&isEntry(proposal.action)?await loadKevEntryConfig({local,mode:policy.mode}):null;
+  if(kevFlow&&isEntry(proposal.action)&&(!kevConfig?.enabled||kevConfig.marketData!=='order-flow'||kevConfig.decisionMode!=='autonomous'))throw Error('KEV_ORDER_FLOW_ACTIVATION_REQUIRED');
+  const checkKev=()=>{const reason=kevConfig&&kevEntryRejection({review:kevReview,snapshot,proposal,config:kevConfig,now:now()});if(reason)throw Error(reason);};
+  if(kevConfig?.enabled){
+   const reason=kevEntryRejection({review:kevReview,snapshot,proposal,config:kevConfig,now:now()});
+   if(reason){
+    await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,reason,kevReview:kevEntryReceipt(kevReview,proposal.pair)});
+    return {id,status:'filtered',action:proposal.action,reason,reasons:[reason]};
+   }
+  }
   const entryStopReason=async()=>await exists(join(local,'TRADING_DISABLED'))?'LOCAL_TRADING_DISABLED':await exists(join(local,'STOP'))?'ENTRY_STOPPED_BEFORE_SEND':null;
   if(isEntry(proposal.action)){
    const reason=await entryStopReason();
@@ -42,11 +59,11 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
     throw new Error(reason);
    }
   }
-  const volumeExperiment=policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules'&&!probePermitId?
+  const volumeExperiment=!kevFlow&&policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules'&&!probePermitId?
    assertVolumeAssignment(snapshot,await getVolumeConfig()):null;
   if(volumeExperiment&&!probePermitId)throw Error('MODEL_VOLUME_EXPERIMENT_NOT_SUPPORTED');
   if(proposal.action!=='hold' && !policy.pairs.includes(proposal.pair)) throw new Error('PAIR_NOT_ALLOWED');
-  const executionQuote=isEntry(proposal.action)?await getQuote(proposal.pair,{mode:policy.mode}):null;
+  const executionQuote=isEntry(proposal.action)?await (kevFlow&&getQuote===market?marketOrderFlow:getQuote)(proposal.pair,{mode:policy.mode}):null;
   if(executionQuote)await writeJson(join(local,'runs',artifactStem+'.execution-quote.json'),executionQuote);
   const account=await client.snapshot();
   const decision=assess({proposal,snapshot,policy,account,records,executionQuote,stopped:await exists(join(local,'STOP')),now:now()});
@@ -70,47 +87,82 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
     if(decisionConfig.demoEngine==='rules'||probePermit){
      if(snapshot.decisionEngine!=='rules'||account.engine?.strategy_version!==RULE_ENGINE_VERSION)throw Error('RULE_ENGINE_RESTART_REQUIRED');
      if(!probePermit){
-      if(snapshot.ruleVersion!==DEMO_RULE_VERSION)throw Error('MODEL_STRATEGY_VERSION_REQUIRED');
+      if(snapshot.ruleVersion!==(kevFlow?KEV_FLOW_POLICY:DEMO_RULE_VERSION))throw Error('MODEL_STRATEGY_VERSION_REQUIRED');
 
      }
-     const rules=probePermit??orderFlowRuleDecision({snapshot,pair:proposal.pair,cost,modelEvidence,quote:executionQuote,now:now()});
+     const rules=probePermit??(kevFlow?kevFlowRule({snapshot,pair:proposal.pair,action:proposal.action,cost,quote:executionQuote,policy,
+       confirmation:proposal.kevConfirmation,confirmationRequired:true,now:now()}):orderFlowRuleDecision({snapshot,pair:proposal.pair,cost,modelEvidence,quote:executionQuote,now:now()}));
      if(!probePermit){
       const checkedAt=new Date(now()).toISOString();
-      await writeJson(join(local,'runs',artifactStem+'.rules-recheck.json'),{schemaVersion:1,at:checkedAt,mode:policy.mode,snapshotId:snapshot.id,pair:proposal.pair,requestedAction:proposal.action,strategyFingerprint:entryVersion.fingerprint,entrySignalEngine:rules.aiAssist?'sampled_order_flow+kronos_advisory':'sampled_order_flow',modelUsedForDecision:Boolean(rules.aiAssist),aiAssist:rules.aiAssist??null,rules});
+      await writeJson(join(local,'runs',artifactStem+'.rules-recheck.json'),{schemaVersion:1,at:checkedAt,mode:policy.mode,snapshotId:snapshot.id,pair:proposal.pair,requestedAction:proposal.action,strategyFingerprint:entryVersion.fingerprint,entrySignalEngine:rules.entrySignalEngine??(rules.aiAssist?'sampled_order_flow+kronos_advisory':'sampled_order_flow'),modelUsedForDecision:Boolean(kevFlow&&kevReview?.invoked||rules.model||rules.aiAssist),...(kevFlow?{kevReview:kevEntryReceipt(kevReview,proposal.pair,proposal.action)}:{}),model:rules.model??null,aiAssist:rules.aiAssist??null,rules});
       if(rules.action==='hold'||rules.action!==proposal.action){
        const reason='FLOW_ENTRY_RECHECK_FILTERED',reasons=rules.reasons??['FLOW_DIRECTION_CHANGED'];
-       await journalAppend(journal,{id,at:checkedAt,status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,...(executionPolicyVersion?{executionPolicyVersion}:{}),reason,reasons,purpose:'strategy',ruleVersion:DEMO_RULE_VERSION});
-       return {id,status:'filtered',action:proposal.action,reason,reasons,purpose:'strategy',ruleVersion:DEMO_RULE_VERSION};
+       await journalAppend(journal,{id,at:checkedAt,status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,...(executionPolicyVersion?{executionPolicyVersion}:{}),reason,reasons,purpose:'strategy',ruleVersion:kevFlow?KEV_FLOW_POLICY:DEMO_RULE_VERSION});
+       return {id,status:'filtered',action:proposal.action,reason,reasons,purpose:'strategy',ruleVersion:kevFlow?KEV_FLOW_POLICY:DEMO_RULE_VERSION};
       }
      }
      if(rules.action!==proposal.action)throw Error('RULE_SIGNAL_REJECTED');
+     if(kevFlow){
+      const priceCheck=assessKevExecutionPrice({snapshot,proposal,executionQuote,cost,policy,review:kevReview,
+       stopFraction:rules.stopFraction,targetFraction:rules.targetFraction});
+      await writeJson(join(local,'runs',artifactStem+'.execution-price-check.json'),{...priceCheck,checkedAt:new Date(now()).toISOString(),snapshotId:snapshot.id,pair:proposal.pair});
+      if(!priceCheck.eligible){
+       await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,
+        snapshotId:snapshot.id,...(executionPolicyVersion?{executionPolicyVersion}:{}),reason:priceCheck.reason,reasons:[priceCheck.reason],purpose:'strategy',ruleVersion:KEV_FLOW_POLICY});
+       return {id,status:'filtered',action:proposal.action,reason:priceCheck.reason,reasons:[priceCheck.reason],purpose:'strategy',ruleVersion:KEV_FLOW_POLICY};
+      }
+     }
      const requestedStakeUsdt=proposal.stakeUsdt;
-     proposal={...proposal,stakeUsdt:Decimal.min(proposal.stakeUsdt,demoRiskStake(rules,cost,policy)).toFixed(8,Decimal.ROUND_DOWN)};
+     proposal={...proposal,stakeUsdt:Decimal.min(proposal.stakeUsdt,(kevFlow?kevFlowStake:demoRiskStake)(rules,cost,policy)).toFixed(8,Decimal.ROUND_DOWN)};
      const sizing=checkDemoOrderSize({market:executionQuote,price:proposal.action==='open-short'?executionQuote.bid:executionQuote.ask,stakeUsdt:proposal.stakeUsdt,leverage:proposal.leverage??1});
      await writeJson(join(local,'runs',artifactStem+'.sizing.json'),{requestedStakeUsdt,stakeUsdt:proposal.stakeUsdt,...sizing});
      if(!sizing.eligible)throw Error('DEMO_ORDER_SIZE_REJECTED: '+sizing.reasons.join(','));
      assess({proposal,snapshot,policy,account,records,executionQuote,stopped:await exists(join(local,'STOP')),now:now()});
-     await writeJson(join(local,'runs',artifactStem+'.executed-proposal.json'),proposal);
-     const minuteTiming=probePermit?null:decisionTiming(snapshot);
-     const cadence=minuteTiming?{decisionCadenceVersion:snapshot.decisionCadenceVersion,decisionIntervalMs:snapshot.decisionIntervalMs,decisionBoundary:snapshot.decisionBoundary}:{};
-     rulePlan={ruleVersion:probePermit?PROBE_VERSION:DEMO_RULE_VERSION,purpose:probePermit?'execution_probe':'strategy',timeframe:rules.timeframe,...(probePermit?{}:{atrTimeframe:'15m',...cadence}),maxHoldingSeconds:rules.maxHoldingSeconds,pair:proposal.pair,isShort:proposal.action==='open-short',
-      stopFraction:rules.stopFraction,targetFraction:rules.targetFraction,maxHoldingBars:rules.maxHoldingBars,riskBudgetUsdt:rules.adaptiveParameters?Number(rules.adaptiveParameters.riskBudgetUsdt):DEMO_RISK_BUDGET_USDT,
-      ...(rules.adaptiveParameters?{adaptiveParameters:rules.adaptiveParameters}:{}),
-      riskCostFraction:Number(riskCostFraction(cost)),maxEntryNotionalUsdt:Number(proposal.stakeUsdt),
-      ...(probePermit?{}:{riskPolicy:demoRiskPolicy(policy.mode),profitProtection:{...DEMO_PROFIT_PROTECTION},entryConfirmation:rules.entryConfirmation,
-       volumeExperiment,entryPolicyVersion:rules.entryPolicyVersion,...(rules.executionQualityVersion?{executionQualityVersion:rules.executionQualityVersion,flowStrength:rules.flowStrength,flowExit:rules.flowExit}:{}),strategyVariant:DEMO_RULE_VERSION,entrySignalEngine:'sampled_order_flow',...(rules.aiAssist?{aiAssist:rules.aiAssist}:{}),
-       entryEvidence:{version:'order-flow-evidence-v1',snapshotId:snapshot.id,usedForEntryDecision:true,
-        proofSha256:createHash('sha256').update(JSON.stringify(rules.entryConfirmation.orderFlow)).digest('hex'),...(rules.aiAssist?{aiAssist:rules.aiAssist}: {})}})};
-     if(!probePermit)nativeGuardInputs={version:minuteTiming?NATIVE_ENTRY_GUARD_VERSION:'kronos-native-entry-v10',snapshotId:snapshot.id,...cadence,
-      mode:policy.mode,pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',
-      candleBoundary:snapshot.candleBoundary,entryDeadline:minuteTiming?.deadline??snapshot.candleBoundary+60000,
-      requiredPriceSpaceBps:rules.requiredPriceSpaceBps,bridgeQuotePrice:rules.entryConfirmation.quotePrice,
-      atr15:rules.atr15,targetAtr:rules.targetAtr,targetFraction:rules.targetFraction,
-      quoteFetchedAt:executionQuote.fetchedAt,maxPriceMoveBps:policy.maxPriceMoveBps,leverage:proposal.leverage??1};
+      await writeJson(join(local,'runs',artifactStem+'.executed-proposal.json'),proposal);
+      const aiEntry=!probePermit&&rules.entryPolicyVersion===MODEL_ENTRY_POLICY;
+      // Minute observations may carry flow cadence, but the model contract is
+      // bound to the candle's first minute. Only flow plans use native cadence.
+      const minuteTiming=probePermit||aiEntry?null:decisionTiming(snapshot);
+      const cadence=minuteTiming?{decisionCadenceVersion:snapshot.decisionCadenceVersion,decisionIntervalMs:snapshot.decisionIntervalMs,decisionBoundary:snapshot.decisionBoundary}:{};
+      const model=aiEntry?{...rules.model,snapshotId:snapshot.id,usedForEntryDecision:true}:null;
+      const entryEvidence=probePermit?null:aiEntry
+       ?{version:'kronos-ai-evidence-v1',snapshotId:snapshot.id,usedForEntryDecision:true,modelFingerprint:rules.model?.modelFingerprint??null,predictionSha256:rules.model?.predictionSha256??null}
+       :{version:kevFlow?'kev-order-flow-evidence-v1':'order-flow-evidence-v1',snapshotId:snapshot.id,usedForEntryDecision:true,
+         proofSha256:createHash('sha256').update(JSON.stringify(rules.entryConfirmation.orderFlow)).digest('hex'),...(rules.aiAssist?{aiAssist:rules.aiAssist}: {})};
+      if(entryEvidence&&kevConfig?.enabled)entryEvidence.kevReview=kevEntryReceipt(kevReview,proposal.pair,proposal.action);
+      rulePlan={ruleVersion:probePermit?PROBE_VERSION:kevFlow?KEV_FLOW_POLICY:DEMO_RULE_VERSION,purpose:probePermit?'execution_probe':'strategy',timeframe:rules.timeframe,...(probePermit?{}:{...(kevFlow?{}:{atrTimeframe:'15m'}),...cadence}),maxHoldingSeconds:rules.maxHoldingSeconds,pair:proposal.pair,isShort:proposal.action==='open-short',
+       stopFraction:rules.stopFraction,targetFraction:rules.targetFraction,maxHoldingBars:rules.maxHoldingBars,riskBudgetUsdt:rules.adaptiveParameters?Number(rules.adaptiveParameters.riskBudgetUsdt):DEMO_RISK_BUDGET_USDT,
+       ...(rules.adaptiveParameters?{adaptiveParameters:rules.adaptiveParameters}:{}),
+       ...(rules.confirmation?{confirmation:rules.confirmation}:{}),
+       riskCostFraction:Number(riskCostFraction(cost)),maxEntryNotionalUsdt:Number(proposal.stakeUsdt),
+       ...(probePermit?{}:{riskPolicy:demoRiskPolicy(policy.mode),profitProtection:{...DEMO_PROFIT_PROTECTION},entryConfirmation:rules.entryConfirmation,
+        volumeExperiment,entryPolicyVersion:rules.entryPolicyVersion,...(rules.executionQualityVersion?{executionQualityVersion:rules.executionQualityVersion,flowStrength:rules.flowStrength,flowExit:rules.flowExit}:{}),strategyVariant:kevFlow?KEV_FLOW_POLICY:DEMO_RULE_VERSION,entrySignalEngine:rules.entrySignalEngine??(rules.aiAssist?'sampled_order_flow+kronos_advisory':'sampled_order_flow'),...(rules.aiAssist?{aiAssist:rules.aiAssist}:{}),...(model?{model}:{}),entryEvidence})};
+      if(!probePermit)nativeGuardInputs=kevFlow
+       ?{version:KEV_NATIVE_VERSION,snapshotId:snapshot.id,...cadence,mode:policy.mode,pair:proposal.pair,
+         side:proposal.action==='open-short'?'short':'long',entryDeadline:minuteTiming.deadline,
+         requiredPriceSpaceBps:rules.requiredPriceSpaceBps,bridgeQuotePrice:rules.entryConfirmation.quotePrice,
+         quoteFetchedAt:executionQuote.fetchedAt,maxPriceMoveBps:policy.maxPriceMoveBps,leverage:proposal.leverage??1,
+         kevReviewSha256:createHash('sha256').update(await readFile(join(local,'runs',snapshot.id+'.kev-review.json'))).digest('hex')}
+       :aiEntry
+       ?{version:'kronos-native-entry-v10',snapshotId:snapshot.id,
+         mode:policy.mode,pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',
+         candleBoundary:snapshot.candleBoundary,modelDeadline:snapshot.candleBoundary+60000,
+         modelFingerprint:rules.entryConfirmation.modelFingerprint,predictionSha256:rules.entryConfirmation.predictionSha256,
+         issuedAt:rules.entryConfirmation.issuedAt,requiredPriceSpaceBps:rules.requiredPriceSpaceBps,
+         forecastClose:rules.entryConfirmation.forecastClose,bridgeQuotePrice:rules.entryConfirmation.quotePrice,
+         quoteFetchedAt:executionQuote.fetchedAt,maxPriceMoveBps:policy.maxPriceMoveBps,leverage:proposal.leverage??1,
+         forecastCloses:rules.entryConfirmation.forecastCloses,originClose:rules.entryConfirmation.originClose,
+         atr15:rules.atr15,targetAtr:rules.targetAtr,targetFraction:rules.targetFraction}
+       :{version:minuteTiming?NATIVE_ENTRY_GUARD_VERSION:'kronos-native-entry-v10',snapshotId:snapshot.id,...cadence,
+         mode:policy.mode,pair:proposal.pair,side:proposal.action==='open-short'?'short':'long',
+         candleBoundary:snapshot.candleBoundary,entryDeadline:minuteTiming?.deadline??snapshot.candleBoundary+60000,
+         requiredPriceSpaceBps:rules.requiredPriceSpaceBps,bridgeQuotePrice:rules.entryConfirmation.quotePrice,
+         atr15:rules.atr15,targetAtr:rules.targetAtr,targetFraction:rules.targetFraction,
+         quoteFetchedAt:executionQuote.fetchedAt,maxPriceMoveBps:policy.maxPriceMoveBps,leverage:proposal.leverage??1};
     }
    }
    const quality=probePermit?{eligible:true,reasons:[],purpose:'execution_probe',note:'Explicit one-shot Demo order/exit verification; excluded from strategy performance.'}
-    :decisionConfig?.demoEngine==='rules'&&entryQualityFn===evaluateEntryQuality?evaluateFlowEntryQuality(snapshot,proposal,now()):await entryQualityFn({proposal,snapshot,analyst,now:now()});
+    :kevFlow?kevFlowQuality(snapshot,proposal,now()):decisionConfig?.demoEngine==='rules'&&entryQualityFn===evaluateEntryQuality?evaluateFlowEntryQuality(snapshot,proposal,now()):await entryQualityFn({proposal,snapshot,analyst,now:now()});
    await writeJson(join(local,'runs',artifactStem+'.quality.json'),{mode:policy.mode,snapshotId:snapshot.id,at,...quality});
    if(!quality.eligible){
     await journalAppend(journal,{id,at,status:'rejected',decisionStatus:'filtered',action:proposal.action,pair:proposal.pair,snapshotId:snapshot.id,...(executionPolicyVersion?{executionPolicyVersion}:{}),reason:'ENTRY_QUALITY_REJECTED',reasons:quality.reasons});
@@ -118,7 +170,7 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
    }
    await writeJson(join(local,'runs',artifactStem+'.version.json'),entryVersion);
    if(policy.mode!=='dry-run'){
-    const proof=await protectionCheckFn({mode:policy.mode,local,account,pair:proposal.pair});
+    const proof=await protectionCheckFn({mode:policy.mode,local,account,pair:proposal.pair,entryPolicyVersion:snapshot.entryPolicyVersion});
     await writeJson(join(local,'runs',artifactStem+'.protection-check.json'),proof);
    }
    if(portfolioCheck){
@@ -134,7 +186,7 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
    await writeJson(join(local,'entry-plans',tag+'.json'),rulePlan);
   }
   await journalAppend(journal,{id,at:new Date(now()).toISOString(),status:'pending',action:proposal.action,pair:proposal.pair,stakeUsdt:proposal.stakeUsdt,
-    snapshotId:snapshot.id,tag,...(executionPolicyVersion?{executionPolicyVersion}:{}),tradeId:decision.tradeId??null,...(rulePlan?{purpose:rulePlan.purpose,ruleVersion:rulePlan.strategyVariant??rulePlan.ruleVersion,volumeExperiment:rulePlan.volumeExperiment??null,...(rulePlan.entryEvidence?{entrySignalEngine:rulePlan.entrySignalEngine,entryEvidence:rulePlan.entryEvidence,entryPolicyVersion:rulePlan.entryPolicyVersion,...(rulePlan.executionQualityVersion?{executionQualityVersion:rulePlan.executionQualityVersion}:{}),...(rulePlan.entryConfirmation?.entryRoute?{entryRoute:rulePlan.entryConfirmation.entryRoute}:{}),riskPolicy:rulePlan.riskPolicy,strategyFingerprint:entryVersion.fingerprint}:{})}:{}),...(isFutures(policy.mode)?{leverage:proposal.leverage}:{})});
+    snapshotId:snapshot.id,tag,...(executionPolicyVersion?{executionPolicyVersion}:{}),tradeId:decision.tradeId??null,...(rulePlan?{purpose:rulePlan.purpose,ruleVersion:rulePlan.strategyVariant??rulePlan.ruleVersion,volumeExperiment:rulePlan.volumeExperiment??null,...(rulePlan.entryEvidence?{entrySignalEngine:rulePlan.entrySignalEngine,entryEvidence:rulePlan.entryEvidence,entryPolicyVersion:rulePlan.entryPolicyVersion,...(rulePlan.model?{model:rulePlan.model}:{}),...(rulePlan.executionQualityVersion?{executionQualityVersion:rulePlan.executionQualityVersion}:{}),...(rulePlan.entryConfirmation?.entryRoute?{entryRoute:rulePlan.entryConfirmation.entryRoute}:{}),riskPolicy:rulePlan.riskPolicy,strategyFingerprint:entryVersion.fingerprint}:{})}:{}),...(isFutures(policy.mode)?{leverage:proposal.leverage}:{})});
   let nativeAttempt,submissionResponded=false;
   try {
    if(isEntry(proposal.action)){
@@ -146,18 +198,23 @@ export async function execute({proposal,snapshot,policy,client,local,modelEviden
    }
    const result=await client.submit(proposal,tag,decision.tradeId,{beforeSend:async engine=>{
     if(isEntry(proposal.action)){
+     checkKev();
      const finalReason=await entryStopReason();
      if(finalReason)throw Error(finalReason);
      if(rulePlan&&engine.strategy_version!==RULE_ENGINE_VERSION)throw Error('RULE_ENGINE_RESTART_REQUIRED');
-     if(!probePermit&&policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules')assertVolumeAssignment(snapshot,await getVolumeConfig());
+     if(!probePermit&&!kevFlow&&policy.mode!=='dry-run'&&snapshot.decisionEngine==='rules')assertVolumeAssignment(snapshot,await getVolumeConfig());
      if(portfolioCheckedAt!==undefined&&(now()-portfolioCheckedAt>15000||now()<portfolioCheckedAt))throw Error('PORTFOLIO_ACCOUNT_STALE');
-     const nativeProtection=policy.mode!=='dry-run'?await protectionCheckFn({mode:policy.mode,local,account:{...account,engine},pair:proposal.pair}):null;
+     const nativeProtection=policy.mode!=='dry-run'?await protectionCheckFn({mode:policy.mode,local,account:{...account,engine},pair:proposal.pair,entryPolicyVersion:snapshot.entryPolicyVersion}):null;
      if(policy.mode!=='dry-run'&&entryCost(snapshot.costFacts,executionQuote,policy.mode,costConfig,now()).status!=='ok')throw Error('ENTRY_COSTS_UNAVAILABLE');
      const latestVersion=await captureStrategyVersion({policy,engine,now:now()});
      if(latestVersion.fingerprint!==entryVersion.fingerprint)throw Error('STRATEGY_CHANGED_BEFORE_SEND');
      const clock=await getClock(policy.mode),wall=Date.now(),mono=performance.now();
      const check=()=>{
+      checkKev();
       if(Math.abs((Date.now()-wall)-(performance.now()-mono))>250)throw Error('CLOCK_JUMP_DETECTED');
+      if(kevFlow&&!kevFlowQuality(snapshot,proposal,Date.now()).eligible)throw Error('KEV_FLOW_EXPIRED_BEFORE_SEND');
+      if(kevFlow&&!confirmationForEntry(proposal.kevConfirmation,{snapshot,mode:policy.mode,pair:proposal.pair,action:proposal.action,now:Date.now()}))
+       throw Error('KEV_FLOW_CONFIRMATION_EXPIRED');
       if(rulePlan?.entryPolicyVersion===FLOW_ONLY_POLICY){
        if(Date.now()>=(decisionTiming(snapshot)?.deadline??snapshot.candleBoundary+60000)||!assessOrderFlow(rulePlan.entryConfirmation.orderFlow,{mode:policy.mode,pair:proposal.pair,long:proposal.action!=='open-short',now:Date.now(),minTakerShare:rulePlan.adaptiveParameters?.minTakerShare,minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance}).eligible)throw Error('FLOW_EXPIRED_BEFORE_SEND');
        if(policy.mode==='demo-futures'&&!assessFuturesFlowContinuation(rulePlan.entryConfirmation.orderFlow,executionQuote,{long:proposal.action!=='open-short'}).eligible)throw Error('FLOW_FUTURES_PRICE_NOT_CONTINUED');

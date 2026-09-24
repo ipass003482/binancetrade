@@ -10,10 +10,11 @@ import {readJson,journalRead} from './io.mjs';
 import {FreqtradeClient} from './freqtrade.mjs';
 import {reviewExecutionQuality} from './execution-quality-review.mjs';
 import {readDemoSession,validateDemoSession,sessionTrades,sessionJournal,sessionOpenCount} from './demo-session.mjs';
+import {loadKevEntryConfig} from './kev-entry.mjs';
 
 const MODES=['demo','demo-futures'];
 const fields=['entryPolicyVersion','executionQualityVersion','ruleVersion','strategyFingerprint'];
-const currentKey=mode=>FLOW_ONLY_POLICY+' / '+(mode==='demo'?SPOT_FLOW_QUALITY_VERSION:'not-applicable');
+const currentKey=(mode,policy)=>policy==='kev-order-flow-v1'?'kev-order-flow-v1 / not-applicable':FLOW_ONLY_POLICY+' / '+(mode==='demo'?SPOT_FLOW_QUALITY_VERSION:'not-applicable');
 const num=v=>{if(!['number','string'].includes(typeof v)||String(v).length>128||String(v).trim()==='')return null;
  try{const d=new Decimal(v);return d.isFinite()&&(d.isZero()||Math.abs(d.e)<=50)?d:null;}catch{return null;}};
 
@@ -62,17 +63,17 @@ function attribution(trade,journal,trades,observedAt){
   return {key:'unattributed',reason:'ENTRY_ATTRIBUTION_NOT_VERIFIED'};
  const policy=p.entryPolicyVersion??p.ruleVersion;
  if(typeof policy!=='string'||!policy.trim())return {key:'unattributed',reason:'POLICY_MISSING'};
- const quality=trade.trading_mode==='futures'?'not-applicable':p.executionQualityVersion??'legacy-unrecorded';
+ const quality=trade.trading_mode==='futures'||policy==='kev-order-flow-v1'?'not-applicable':p.executionQualityVersion??'legacy-unrecorded';
  if(typeof quality!=='string')return {key:'unattributed',reason:'QUALITY_INVALID'};
  return {key:policy+' / '+quality,reason:null};
 }
 
-export function buildStrategyReview({mode,trades,journal,observedAt,session=null}){
+export function buildStrategyReview({mode,trades,journal,observedAt,session=null,currentEntryPolicyVersion}){
  if(session)session=validateDemoSession(session,{now:Date.parse(observedAt)});
  const outsideSessionOpenCount=sessionOpenCount(trades,session);
  trades=sessionTrades(trades,session);journal=sessionJournal(journal,session);
  if(!MODES.includes(mode)||!Array.isArray(trades)||!Array.isArray(journal))throw Error('STRATEGY_REVIEW_INPUT');
- const warnings=[],groups=new Map([[currentKey(mode),[]]]),all=evaluatePerformance({mode,trades,observedAt});
+ const activeKey=currentKey(mode,currentEntryPolicyVersion),warnings=[],groups=new Map([[activeKey,[]]]),all=evaluatePerformance({mode,trades,observedAt});
  const ids=new Set(trades.map(t=>t.trade_id)),missingSettlements=[];
  if(outsideSessionOpenCount)missingSettlements.push({reason:'OUTSIDE_SESSION_OPEN_POSITION',count:outsideSessionOpenCount});
  for(const p of journal.filter(r=>r?.status==='pending'&&['buy','open-long','open-short'].includes(r.action))){
@@ -91,7 +92,7 @@ export function buildStrategyReview({mode,trades,journal,observedAt,session=null
   const report=evaluatePerformance({mode,trades:items,observedAt}),s=report.summary;
   const open=items.filter(t=>t.is_open===true),floating=open.map(t=>num(t.profit_abs));
   const floatingComplete=floating.every(v=>v!==null);
-  return {key,current:key===currentKey(mode),tradeIds:items.map(t=>t.trade_id),
+  return {key,current:key===activeKey,tradeIds:items.map(t=>t.trade_id),
    closedCount:s.closedTrades,openCount:open.length,wins:s.winningTrades,losses:s.losingTrades,
    winRate:s.winRate,netRealizedUsdt:s.netRealizedUsdt,
    floatingUsdt:floatingComplete?floating.reduce((a,b)=>a.plus(b),new Decimal(0)).toFixed():null,
@@ -122,7 +123,8 @@ async function inputFor(mode){
   try{plansByTag[t.enter_tag]=await readJson(join(local,'entry-plans',t.enter_tag+'.json'));}catch{/* Unknown evidence remains unknown. */}
  }
  let protection=null;try{protection=await readJson(join(local,'protection-readiness.json'));}catch{}
- return {trades,journal,plansByTag,protection};
+ const kevConfig=await loadKevEntryConfig({local,mode});
+ return {trades,journal,plansByTag,protection,currentEntryPolicyVersion:kevConfig.marketData==='order-flow'?'kev-order-flow-v1':undefined};
 }
 export async function readStrategyReview({readFor=inputFor,now=()=>Date.now(),readSession=readDemoSession,session:providedSession}={}){
  const started=now(),session=providedSession===undefined?await readSession({now:started}):providedSession;

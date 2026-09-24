@@ -14,13 +14,13 @@ import { highFrequencyProposalSchema } from './config.mjs';
 
 const PUBLIC='https://data-api.binance.vision';
 const DEFAULT_PAIRS=['BTC/USDT','ETH/USDT','SOL/USDT','BNB/USDT'];
-const topNumber=(value,code)=>{const n=Number(value);if(!Number.isFinite(n))throw new Error(code);return n;};
+const topNumber=(value,code)=>{const n=Number(value);if(!['number','string'].includes(typeof value)||String(value).trim()===''||!Number.isFinite(n))throw new Error(code);return n;};
 const symbolOf=pair=>pair.replace('/','');
 const quoteValue=(price,quantity)=>new Decimal(price).mul(quantity).toNumber();
 const sumLevels=levels=>levels.reduce((sum,[price,quantity])=>sum+quoteValue(price,quantity),0);
 const returnBps=(last,previous)=>previous>0&&last>0?(last/previous-1)*10000:null;
 
-function marketFeatures(pair,book,depth,trades,bars,observedAt,costs){
+function marketFeatures(pair,book,depth,trades,bars,observedAt,costs,quoteObservedAt){
  const symbol=symbolOf(pair);
  if(book.symbol!==symbol||!Array.isArray(depth.bids)||!Array.isArray(depth.asks)||
   !Array.isArray(trades)||!Array.isArray(bars)||depth.bids.length<5||depth.asks.length<5||trades.length<3||bars.length<8)
@@ -38,9 +38,11 @@ function marketFeatures(pair,book,depth,trades,bars,observedAt,costs){
  const closes=closedBars.map(row=>row.close),lastClose=closes.at(-1),previous=steps=>closes.length>steps?closes.at(-1-steps):null;
  const barReturns=closes.slice(1).map((close,index)=>returnBps(close,closes[index])).filter(value=>value!==null);
  const volatility1mBps=barReturns.length?barReturns.reduce((sum,value)=>sum+Math.abs(value),0)/barReturns.length:null;
- const spreadBps=(ask-bid)/bid*10000,estimatedRoundTripCostBps=spreadBps+(costs.slippageBpsPerSide*2);
+ const slippage=topNumber(costs.slippageBpsPerSide,'HIGH_FREQUENCY_SLIPPAGE_INVALID');
+ if(slippage<0)throw new Error('HIGH_FREQUENCY_SLIPPAGE_INVALID');
+ const spreadBps=(ask-bid)/bid*10000,additionalSlippageBps=slippage*2,estimatedRoundTripCostBps=spreadBps+additionalSlippageBps;
  return {pair,mode:'dry-run',source:PUBLIC,observedAt,dataStatus:'ok',
-  quote:{bid,ask,mid:(bid+ask)/2,spreadBps},
+  quote:{bid,ask,mid:(bid+ask)/2,spreadBps,observedAt:quoteObservedAt},
   orderBook:{lastUpdateId:depth.lastUpdateId??null,top5:{bids,asks},bidDepthQuote:bidDepth,askDepthQuote:askDepth,
    imbalanceTop5:depthTotal>0?(bidDepth-askDepth)/depthTotal:null},
   takerFlow:{tradeCount:parsedTrades.length,buyQuote,sellQuote,buyShare:totalFlow>0?buyQuote/totalFlow:null,
@@ -49,30 +51,31 @@ function marketFeatures(pair,book,depth,trades,bars,observedAt,costs){
   microMomentum:{return1mBps:returnBps(lastClose,previous(1)),return5mBps:returnBps(lastClose,previous(5)),
    return15mBps:returnBps(lastClose,previous(15)),volatility1mBps,maxBarMoveBps:barReturns.length?Math.max(...barReturns.map(value=>Math.abs(value))):null,
    lastClosed1m:lastClose,closedBarCount:closedBars.length},
-  cost:{status:'scenario_only',feeStatus:'unavailable',slippageBpsPerSide:costs.slippageBpsPerSide,
+  cost:{version:'quote-cost-scenario-v2',status:'scenario_only',feeStatus:'unavailable',roundTripFeeBps:null,netCostBps:null,slippageBpsPerSide:slippage,additionalSlippageBps,
    spreadBps,estimatedRoundTripCostBps,requiredPriceSpaceBps:estimatedRoundTripCostBps+costs.priceSpaceBufferBps,
-   note:'Research-only cost scenario; account commission was not read.'}};
+   note:'Screening estimate includes spread and extra slippage, but excludes unknown account commission. Ask-to-bid markouts already include spread; subtract only additionalSlippageBps from those markouts. This is not net PnL.'}};
 }
 
-async function oneMarket(pair,{fetchImpl,observedAt,costs}){
+async function oneMarket(pair,{fetchImpl,observedAt,costs,clock}){
  const symbol=symbolOf(pair),query='?symbol='+symbol;
  const [book,depth,trades,bars]=await Promise.all([
-  jsonFetch(PUBLIC+'/api/v3/ticker/bookTicker'+query,{fetchImpl}),
+  jsonFetch(PUBLIC+'/api/v3/ticker/bookTicker'+query,{fetchImpl}).then(value=>({value,observedAt:new Date(clock()).toISOString()})),
   jsonFetch(PUBLIC+'/api/v3/depth'+query+'&limit=20',{fetchImpl}),
   jsonFetch(PUBLIC+'/api/v3/aggTrades'+query+'&limit=100',{fetchImpl}),
   jsonFetch(PUBLIC+'/api/v3/klines'+query+'&interval=1m&limit=30',{fetchImpl})
  ]);
- return marketFeatures(pair,book,depth,trades,bars,observedAt,costs);
+ return marketFeatures(pair,book.value,depth,trades,bars,observedAt,costs,book.observedAt);
 }
 
 export async function collectHighFrequencySnapshot(options={}){
  const {pairs=DEFAULT_PAIRS,fetchImpl=fetch,now=Date.now()}=options;
+ const clock=options.clock??(typeof options.now==='number'?()=>options.now:Date.now);
  const costs=options.costs??await loadCosts();
  if(!Array.isArray(pairs)||pairs.length<1||pairs.some(pair=>!/^[A-Z0-9]+\/USDT$/.test(pair)))throw new Error('HIGH_FREQUENCY_PAIRS_INVALID');
  const createdAt=new Date(now).toISOString(),snapshot={id:randomUUID(),mode:'dry-run',timeframe:'1m',createdAt,
   purpose:'ai-high-frequency-v1',horizonSeconds:[15,60],markets:[],evidence:[],errors:[],researchCoverage:[]};
  const results=await Promise.all(pairs.map(async pair=>{
-  try{return {pair,market:await oneMarket(pair,{fetchImpl,observedAt:createdAt,costs})};}
+  try{return {pair,market:await oneMarket(pair,{fetchImpl,observedAt:createdAt,costs,clock})};}
   catch(error){return {pair,error:safeError(error)};}
  }));
  for(const result of results){
@@ -89,7 +92,7 @@ export async function collectHighFrequencySnapshot(options={}){
  }
  snapshot.markets.sort((a,b)=>a.pair.localeCompare(b.pair));
  snapshot.evidence.sort((a,b)=>a.id.localeCompare(b.id));
- snapshot.completedAt=new Date().toISOString();
+ snapshot.completedAt=new Date(clock()).toISOString();
  return snapshot;
 }
 
@@ -104,7 +107,7 @@ export async function runHighFrequencyCycle(options={}){
   strategyConfig,strategyProfile,sensitivity,includeSnapshot=false}=options;
  const policy=options.policy??await loadPolicy('dry-run');
  if(policy.mode!=='dry-run')throw new Error('HIGH_FREQUENCY_RESEARCH_DRY_RUN_ONLY');
- const startedAt=new Date(now()).toISOString(),snapshot=await collectFn({fetchImpl,now:now()});
+ const startedAt=new Date(now()).toISOString(),snapshot=await collectFn({fetchImpl,now:now(),clock:now});
  const highFrequencyConfig=strategyConfig??await loadHighFrequencyStrategy();
  const strategyPlan=await buildHighFrequencyStrategyPlan(snapshot,{config:highFrequencyConfig,profile:strategyProfile,sensitivity});
  const plannedSnapshot={...snapshot,strategyPlan};
@@ -113,7 +116,7 @@ export async function runHighFrequencyCycle(options={}){
  const providedControl=analysis.proposal.strategyControl,rawControl=providedControl??{decision:'hold',profile:'auto',sensitivity:'balanced',evidenceIds:[],reason:'AI 未提供受控策略選擇'};
  const controlledPlan=providedControl&&rawControl.decision==='use'?await buildHighFrequencyStrategyPlan(plannedSnapshot,{config:highFrequencyConfig,profile:rawControl.profile,sensitivity:rawControl.sensitivity}):null;
  const proposal=providedControl?observerProposal(applyStrategyControl(analysis.proposal,rawControl,controlledPlan,plannedSnapshot)):observerProposal(analysis.proposal);
- const result={version:'ai-high-frequency-v1',mode:'dry-run',tradeEnabled:false,startedAt,completedAt:new Date().toISOString(),
+ const result={version:'ai-high-frequency-v1',mode:'dry-run',tradeEnabled:false,startedAt,completedAt:new Date(now()).toISOString(),
   snapshotId:snapshot.id,marketCount:snapshot.markets.length,errors:snapshot.errors,proposal,rawProposal:analysis.proposal,
   strategy:{version:strategyPlan.version,profile:strategyPlan.profile,sensitivity:strategyPlan.sensitivity,selected:strategyPlan.selected,candidateCount:strategyPlan.candidates.length,
    aiControl:rawControl,applied:controlledPlan?controlledPlan.selected:null},
