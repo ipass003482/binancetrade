@@ -51,7 +51,9 @@ function kevAttributable(entry){
   entry.entryPolicyVersion===KEV_FLOW_POLICY&&entry.entrySignalEngine==='kev_order_flow'&&entryActions.has(entry.action)&&
   typeof entry.pair==='string'&&entry.pair.length>0&&typeof entry.snapshotId==='string'&&entry.snapshotId.length>0&&
   e?.version==='kev-order-flow-evidence-v1'&&e.usedForEntryDecision===true&&e.snapshotId===entry.snapshotId&&hash(e.proofSha256)&&
-  r?.version==='kev-codex-entry-v1'&&r.decisionMode==='autonomous'&&r.provider==='codex-cli'&&
+  (r?.version==='kev-codex-entry-v1'&&r.provider==='codex-cli'||
+   r?.version==='jev-typesafe-entry-v1'&&r.provider==='typesafe-api'&&r.model==='jev-1.13.0'&&
+   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(r.providerRevision??''))&&r.decisionMode==='autonomous'&&
   typeof r.model==='string'&&r.model.length>0&&typeof r.requestId==='string'&&r.requestId.length>0&&r.requestId.length<=100&&
   r.snapshotId===entry.snapshotId&&hash(r.snapshotSha256)&&hash(r.configSha256)&&hash(r.proofSha256)&&
   r.probabilitiesCalibrated===false&&d?.approved===true&&d.choice==='select'&&d.pair===entry.pair&&d.action===entry.action&&

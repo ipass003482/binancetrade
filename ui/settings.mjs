@@ -1,0 +1,33 @@
+import {ReviewerSettingsStore,reviewerErrors} from './reviewer-store.mjs';
+const localTime=value=>value&&Number.isFinite(Date.parse(value))?new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)):null;
+export function mountReviewerSettings({document:doc=globalThis.document,store=new ReviewerSettingsStore()}={}){
+ const ids=['active-provider','active-model','active-badge','changed-at','refresh-status','settings-message','key-state','jev-key-form','jev-api-key','toggle-key','save-key','verified-at','kev-current','jev-current','switch-kev','switch-jev','jev-switch-help'];
+ const el=Object.fromEntries(ids.map(id=>[id,doc.getElementById(id)]));
+ const render=()=>{const {status:s,loading,busy,errorCode,notice}=store.state,disabled=loading||busy||!s;
+  el['active-provider'].textContent=s?(s.provider==='jev'?'Jev':'Kev'):(loading?'讀取中':'狀態未知');
+  el['active-model'].textContent=s?s.model:'無法確認目前模型';
+  el['active-badge'].textContent=s?'目前已選用':'尚未確認';
+  el['changed-at'].textContent=s?(localTime(s.changedAt)?'更新於 '+localTime(s.changedAt):'使用工作區預設設定'):'更新時間待確認';
+  el['key-state'].textContent=!s?'尚未確認':s.keyVerified?'已驗證':s.keyConfigured?'已儲存，尚未驗證':'尚未設定';
+  el['verified-at'].textContent=s?.keyVerified&&localTime(s.verifiedAt)?'驗證於 '+localTime(s.verifiedAt):'尚無有效驗證時間';
+  el['refresh-status'].disabled=loading||busy;el['jev-api-key'].disabled=disabled;el['toggle-key'].disabled=disabled;el['save-key'].disabled=disabled;
+  el['save-key'].textContent=busy?'處理中…':'儲存並驗證金鑰';
+  el['kev-current'].hidden=s?.provider!=='kev';el['jev-current'].hidden=s?.provider!=='jev';
+  el['switch-kev'].disabled=disabled||s?.provider==='kev';
+  const currentJev=s?.provider==='jev'&&s.credentialId===s.jev.credentialId;
+  el['switch-jev'].disabled=disabled||!s?.keyVerified||currentJev;
+  el['switch-jev'].textContent=s?.provider==='jev'&&!currentJev?'套用新的 Jev 金鑰':'切換到 Jev';
+  el['jev-switch-help'].textContent=!s?'設定確認後才能切換。':!s.keyVerified?(s.provider==='jev'?'最新金鑰尚未驗證；目前選用的 Jev 金鑰維持不變。':'請先儲存並驗證 Jev API key。'):currentJev?'目前使用這組已驗證的 Jev 金鑰。':'金鑰已驗證，可套用至之後的新決策。';
+  el['settings-message'].textContent=errorCode?reviewerErrors[errorCode]??reviewerErrors.REVIEWER_UNAVAILABLE:busy?'正在處理設定，請稍候…':loading?'正在讀取本機設定…':notice??'設定已確認。儲存金鑰與切換審核器需分別操作。';
+  el['settings-message'].dataset.kind=errorCode?'error':notice?'success':'info';
+ };
+ store.addEventListener('change',render);
+ el['jev-key-form'].addEventListener('submit',event=>{event.preventDefault();const apiKey=el['jev-api-key'].value;el['jev-api-key'].value='';el['jev-api-key'].type='password';el['toggle-key'].textContent='顯示';el['toggle-key'].setAttribute('aria-pressed','false');void store.saveKey(apiKey);});
+ el['toggle-key'].addEventListener('click',()=>{const show=el['jev-api-key'].type==='password';el['jev-api-key'].type=show?'text':'password';el['toggle-key'].textContent=show?'隱藏':'顯示';el['toggle-key'].setAttribute('aria-pressed',String(show));});
+ el['switch-kev'].addEventListener('click',()=>void store.switchProvider('kev'));
+ el['switch-jev'].addEventListener('click',()=>void store.switchProvider('jev'));
+ el['refresh-status'].addEventListener('click',()=>void store.refresh());
+ globalThis.addEventListener?.('pagehide',()=>{el['jev-api-key'].value='';el['jev-api-key'].type='password';});
+ render();void store.refresh();return {store,render};
+}
+if(globalThis.document)mountReviewerSettings();

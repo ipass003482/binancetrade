@@ -98,7 +98,9 @@ test('flow manifests still require and detect changes to native protection, flow
  const args={policy:{mode:'demo'},analyst:{version:1,style:'active'}},base=await captureStrategyVersion(args),root=await copySources(base);
  const required=['src/spot-candidate.mjs','src/spot-candidate-store.mjs','scripts/demo_model_guard.py','scripts/demo_protection.py','scripts/demo_order_flow.py',
   'scripts/demo_flow_exit.py','freqtrade/strategies/RuleExits.py','src/protection.mjs','src/order-flow.mjs',
-  'src/bridge.mjs','src/risk.mjs','src/demo-risk.mjs','src/model-pullback.mjs'];
+  'src/bridge.mjs','src/risk.mjs','src/demo-risk.mjs','src/model-pullback.mjs',
+  'src/kev-confirmation.mjs','src/health.mjs','src/observation-wait.mjs','src/decision-cost-prefetch.mjs',
+  'src/kev-portfolio.mjs','src/quote-path-archive.mjs'];
  for(const file of required){
   assert.ok(base.sources.some(source=>source.path===file),file+' must remain in execution scope');
   await appendFile(join(root,file),'\nexecution-source-change');

@@ -15,11 +15,12 @@ from pathlib import Path
 from ccxt import ROUND_DOWN, ROUND_UP
 
 from freqtrade.exceptions import InvalidOrderException, InsufficientFundsError, TemporaryError
-from demo_model_guard import order_context, VERSION as NATIVE_ENTRY_GUARD_VERSION, RISK_POLICY_VERSION, KEV_GUARD_VERSION
+from demo_model_guard import order_context, VERSION as NATIVE_ENTRY_GUARD_VERSION, RISK_POLICY_VERSION, KEV_GUARD_VERSION, KEV_NET_HARVEST_POLICY, KEV_DECISION_PROVIDERS
+from kev_entry_signal import KEV_ENTRY_SIGNAL_POLICY
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTECTION_VERSION = 'demo-native-stop-v1'
-ENGINE_VERSION = 'demo-rule-exits-v12'
+ENGINE_VERSION = 'demo-rule-exits-v13'
 CANCEL_RECONCILIATION_VERSION = 'terminal-read-v2'
 # Bounded read-only backoff after ONE cancel request; never resend a mutation.
 CANCEL_READ_DELAYS_SECONDS = (0, .25, .5, 1, 2)
@@ -77,7 +78,9 @@ class GuardedDemoStops:
         state.update(engineVersion=ENGINE_VERSION, asOf=datetime.now(timezone.utc).isoformat(),
                      processId=os.getpid(), cancelReconciliationVersion=CANCEL_RECONCILIATION_VERSION,
                      nativeEntryGuardVersion=NATIVE_ENTRY_GUARD_VERSION, kevEntryGuardVersion=KEV_GUARD_VERSION, riskPolicyVersion=RISK_POLICY_VERSION,
-                     stopPriceVersion='stable-unarmed-stop-v1',
+                     stopPriceVersion='stable-unarmed-stop-v1', kevExitPolicies=[KEV_NET_HARVEST_POLICY['version']],
+                     kevEntrySignalPolicies=[KEV_ENTRY_SIGNAL_POLICY['version']],
+                     decisionProviders=list(KEV_DECISION_PROVIDERS),
                      stopLimitRatio=(self._config.get('order_types', {}).get('stoploss_on_exchange_limit_ratio')
                                      if self._protection_mode == 'demo' else None))
         path = self._protection_path

@@ -30,20 +30,61 @@ test('Kev flow collection requests zero klines and yields no candle or technical
  for(const mode of ['demo','demo-futures']){
   const pair=mode==='demo'?'BTC/USDT':'BTC/USDT:USDT',calls=[],reads=[],raw={mode,pair,books:[],trades:[]};
   const snapshot=await collectOrderFlow({mode,pairs:[pair]},{fetchImpl:fetchFixture(mode,calls),
-   readOrderFlowFn:async(...args)=>{reads.push(args);return raw;},includeWeb3:true,
+   readOrderFlowSampleFn:async(...args)=>{reads.push(args);return {mode,version:'sampled-demo-flow-v1',markets:{[pair]:raw}};},includeWeb3:true,
    queryWeb3:()=>assert.fail('Order-flow entry must not request web3 research')});
   assert.equal(snapshot.entryPolicyVersion,'kev-order-flow-v1');assert.equal(snapshot.timeframe,'order-flow');
   assert.equal(snapshot.decisionBoundary,B);assert.equal('candleBoundary' in snapshot,false);
-  assert.equal(snapshot.markets[0].orderFlow,raw);assert.equal('candles' in snapshot.markets[0],false);
+  assert.deepEqual(snapshot.markets[0].orderFlow,raw);assert.equal('candles' in snapshot.markets[0],false);
   assert.equal('candleBoundary' in snapshot.markets[0],false);assert.equal(snapshot.evidence.length,1);
   assert.equal(snapshot.evidence.some(e=>e.id.startsWith('technical:')),false);
-  assert.deepEqual(reads,[[mode,pair]]);assert.equal(calls.some(url=>url.includes('klines')),false);
+  assert.deepEqual(reads,[[mode]]);assert.equal(calls.some(url=>url.includes('klines')),false);
   assert.equal(calls.length,mode==='demo'?3:4);
   assert.ok(calls.every(url=>new URL(url).hostname===(mode==='demo'?'demo-api.binance.com':'demo-fapi.binance.com')));
   verifyScheduledDecision(snapshot,B,B+20000);
   const timing=verifyEntryTiming({snapshot,pair,mode,clock:snapshot.clock,now:B+20000});
   assert.equal(timing.boundary,B);assert.equal(timing.decisionDeadline,B+M);
   assert.equal('lastCandleCloseAt' in timing,false);
+ }
+});
+
+test('one latest sampler generation is captured after slow quote collection and cannot change after snapshot creation',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:B+5000});
+ const pairs=['BTC/USDT','ETH/USDT'];let reads=0,releaseInfo,quoteRequests=0;
+ const pendingInfo=new Promise(resolve=>{releaseInfo=resolve;});
+ const sample=at=>({mode:'demo',version:'sampled-demo-flow-v1',observedAt:at,completedAt:at,pid:99,
+  markets:Object.fromEntries(pairs.map(pair=>[pair,{mode:'demo',pair,books:[{at}],trades:[]}]))});
+ let visible=sample(B-3000);
+ const collecting=collectOrderFlow({mode:'demo',pairs},{readOrderFlowSampleFn:async()=>{reads++;return visible;},
+  fetchImpl:async raw=>{
+   const url=new URL(raw),symbol=url.searchParams.get('symbol');
+   if(url.pathname.endsWith('/time'))return new Response(JSON.stringify({serverTime:Date.now()}));
+   if(url.pathname.endsWith('/exchangeInfo')){await pendingInfo;return new Response(JSON.stringify({symbols:pairs.map(pair=>({
+    symbol:pair.replace('/',''),baseAsset:pair.split('/')[0],quoteAsset:'USDT',status:'TRADING',isSpotTradingAllowed:true,filters:[]}))}));}
+   if(url.pathname.endsWith('/ticker/bookTicker')){quoteRequests++;return new Response(JSON.stringify({symbol,bidPrice:'100',askPrice:'100.01'}));}
+   assert.fail('Unexpected endpoint');
+  }});
+ for(let i=0;i<30;i++)await Promise.resolve();
+ assert.equal(quoteRequests,2);assert.equal(reads,0,'Do not freeze a flow generation when quote requests start');
+ t.mock.timers.setTime(B+7000);visible=sample(B+6500);releaseInfo();
+ const snapshot=await collecting;
+ assert.equal(reads,1);assert.equal(snapshot.markets.length,2);
+ for(const market of snapshot.markets)assert.equal(market.orderFlow.books[0].at,B+6500);
+ assert.equal(snapshot.orderFlowAcquisition.completedAt,B+6500);
+ assert.equal(snapshot.orderFlowAcquisition.acquiredAt,new Date(B+7000).toISOString());
+ const original=JSON.stringify(snapshot);
+ visible.markets[pairs[0]].books[0].at=B+17000;visible=sample(B+17000);
+ assert.equal(JSON.stringify(snapshot),original,'Later sampler changes cannot replace reviewed proof bytes');
+});
+
+test('a failed or wrong-mode latest publication remains missing with no cached proof fallback',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:B+20000});
+ const pair='BTC/USDT';
+ for(const published of [null,{mode:'demo-futures',version:'sampled-demo-flow-v1',markets:{[pair]:{pair}}},
+  {mode:'demo',version:'sampled-demo-flow-v1',error:'FLOW_SAMPLE_UNAVAILABLE',markets:{[pair]:{pair}}}]){
+  let reads=0;const snapshot=await collectOrderFlow({mode:'demo',pairs:[pair]},
+   {fetchImpl:fetchFixture('demo',[]),readOrderFlowSampleFn:async()=>{reads++;return published;}});
+  assert.equal(reads,1);assert.equal(snapshot.markets[0].orderFlow,null);
+  assert.equal(snapshot.orderFlowAcquisition.observedAt,null);
  }
 });
 test('no-candle market collection preserves instrument, symbol, quote and funding identity checks',async()=>{

@@ -17,6 +17,8 @@ import pytest
 
 from demo_model_guard_support import guard, isolate, fake_exchange, MS, BOUNDARY, SNAPSHOT_ID, TAG
 from demo_order_flow import validate_flow, FlowValidationError
+from kev_entry_signal import KEV_ENTRY_SIGNAL_POLICY, assess_kev_entry_signal
+from test_kev_entry_signal import proof as coherent_proof
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'freqtrade' / 'strategies'))
 from RuleExits import RuleExits, valid_plan, TRAILING_POLICY
@@ -121,12 +123,66 @@ def plan(root, short=False, minute=0):
         entryConfirmation=dict(version='kev-flow-confirmation-v1', orderFlow=proof, quotePrice='100'),
         entryEvidence=dict(version='kev-order-flow-evidence-v1', snapshotId=SNAPSHOT_ID, usedForEntryDecision=True,
             proofSha256=sha256(json.dumps(proof, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(), kevReview=receipt),
-        nativeEntryGuard=dict(version='kev-native-entry-v1', snapshotId=SNAPSHOT_ID, mode=mode, pair=pair, side=side,
+        nativeEntryGuard=dict(version='kev-native-entry-v2', snapshotId=SNAPSHOT_ID, mode=mode, pair=pair, side=side,
             **cadence, entryDeadline=boundary+60000, requiredPriceSpaceBps='61', bridgeQuotePrice='100',
             quoteFetchedAt=iso(now), maxPriceMoveBps='50', leverage=1, kevReviewSha256=review_hash,
             clock=dict(mode=mode, source=('https://demo-fapi.binance.com/fapi/v1/time' if short else 'https://demo-api.binance.com/api/v3/time'),
                 requestStartedAt=now-10, receivedAt=now, serverTime=now)))
     write_cost_fixture(root, value, proof)
+    return value
+
+
+def coherent_plan(root, short=False):
+    value = plan(root, short)
+    mode = value['nativeEntryGuard']['mode']
+    proof = coherent_proof(not short, mode, MS)
+    value['entryConfirmation']['orderFlow'] = proof
+    value['entryEvidence']['proofSha256'] = sha256(json.dumps(proof, separators=(',', ':')).encode()).hexdigest()
+    value['entrySignalPolicy'] = dict(KEV_ENTRY_SIGNAL_POLICY)
+    value['exitPolicy'] = dict(guard.KEV_NET_HARVEST_POLICY)
+    value['nativeEntryGuard']['version'] = 'kev-native-entry-v3'
+    write_cost_fixture(root, value, proof)
+    folder = root / 'local' / mode / 'runs'
+    snapshot_path = folder / (SNAPSHOT_ID+'.snapshot.json')
+    snapshot = json.loads(snapshot_path.read_text())
+    snapshot['entrySignalPolicy'] = dict(KEV_ENTRY_SIGNAL_POLICY)
+    write_json(snapshot_path, snapshot)
+    review_path = folder / (SNAPSHOT_ID+'.kev-review.json')
+    review = json.loads(review_path.read_text())
+    state = review['request']['state']
+    state.update(requestVersion='kev-flow-request-v5', entrySignalPolicy=dict(KEV_ENTRY_SIGNAL_POLICY),
+                 exitPolicy=dict(guard.KEV_NET_HARVEST_POLICY))
+    state['candidates'][0].update(entrySignalPolicyVersion=KEV_ENTRY_SIGNAL_POLICY['version'],
+                                  exitPolicyVersion=guard.KEV_NET_HARVEST_POLICY['version'])
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(review_path, review)
+    return value
+
+
+def provider_plan(root, short=False, provider='typesafe-api'):
+    value = coherent_plan(root, short)
+    folder = root / 'local' / value['nativeEntryGuard']['mode'] / 'runs'
+    review_path, snapshot_path = folder / (SNAPSHOT_ID+'.kev-review.json'), folder / (SNAPSHOT_ID+'.snapshot.json')
+    review, snapshot = json.loads(review_path.read_text()), json.loads(snapshot_path.read_text())
+    jev = provider == 'typesafe-api'
+    version, model = ('jev-typesafe-entry-v1', 'jev-1.13.0') if jev else ('kev-codex-entry-v1', 'gpt-6-luna')
+    revision = '12345678-1234-4234-9234-123456789abc'
+    review.update(version=version, provider=provider, providerRevision=revision, actualModel=model)
+    snapshot['kevEntry'] = dict(enabled=True, version=version, provider=provider, providerRevision=revision, model=model)
+    review['request']['state']['decisionProvider'] = dict(provider=provider, model=model, revision=revision)
+    review['response']['backend']['actual_model'] = model
+    if jev:
+        review['request']['model'] = review['response']['model'] = model
+        review['requestId'] = review['response']['request_id'] = 'abcdef12-1234-4234-9234-123456789abc'
+        review['response']['created_at'] = review['completedAt']
+        review['response']['answers']['entry']['confidence'] = .7
+        review['response']['usage'] = dict(input_tokens=10, output_tokens=0)
+        review['response']['upstream'] = copy.deepcopy({k: review['response'][k] for k in ('model', 'answers', 'usage')})
+        review['response']['backend'] = dict(name=provider, actual_model=model, weights_loaded=False,
+            probabilities_calibrated=False, api_calls=1, request_id_source='host', timestamp_source='host')
+    value['entryEvidence']['kevReview'].update(version=version, provider=provider, model=model,
+        providerRevision=revision, requestId=review['requestId'])
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(review_path, review)
+    write_json(snapshot_path, snapshot)
     return value
 
 
@@ -537,7 +593,7 @@ def test_kev_callback_rejection_receipt_uses_minute_identity(frozen, tmp_path):
     write_json(tmp_path / 'local/demo/entry-plans' / (TAG+'.json'), value)
     assert guard.record_callback_rejection(value, 'demo', value['pair'], TAG, 'DEMO_NATIVE_MODEL_KEV_SELECTION')
     receipt = json.loads((tmp_path / 'local/demo/entry-rejections' / (TAG+'.json')).read_text())
-    assert receipt['nativeEntryGuardVersion'] == 'kev-native-entry-v1'
+    assert receipt['nativeEntryGuardVersion'] == 'kev-native-entry-v2'
     assert receipt['decisionBoundary'] == BOUNDARY+60000
 
 
@@ -554,18 +610,20 @@ import {buildKevFlowBridgePlan,KEV_BRIDGE_TEST_NOW} from './test/kev-flow-bridge
 mock.timers.enable({apis:['Date'],now:KEV_BRIDGE_TEST_NOW});
 try {
  const rows=[];
- for (const [mode,short] of [['demo',false],['demo-futures',false],['demo-futures',true]])
-  rows.push(await buildKevFlowBridgePlan({mode,short}));
+ for (const [coherent,provider] of [[false,'kev'],[true,'kev'],[true,'jev']])
+  for (const [mode,short] of [['demo',false],['demo-futures',false],['demo-futures',true]])
+   rows.push(await buildKevFlowBridgePlan({mode,short,coherent,provider}));
  console.log(JSON.stringify(rows));
 } finally { mock.timers.reset(); }
 """
     result = subprocess.run([executable, '--input-type=module', '-e', source],
-        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, encoding='utf-8', timeout=30)
     assert result.returncode == 0, result.stderr
-    return {(row['mode'], row['short']): row for row in json.loads(result.stdout)}
+    return {(row['mode'], row['short'], row['coherent'], 'jev' if row['plan']['entryEvidence']['kevReview']['provider'] == 'typesafe-api' else 'kev'): row for row in json.loads(result.stdout)}
 
 
-@pytest.mark.parametrize('case', [('demo', False), ('demo-futures', False), ('demo-futures', True)])
+@pytest.mark.parametrize('case', [(mode, short, coherent, provider) for coherent, provider in ((False, 'kev'), (True, 'kev'), (True, 'jev'))
+    for mode, short in [('demo', False), ('demo-futures', False), ('demo-futures', True)]])
 def test_actual_candle_free_host_plan_through_native_callback_context_wire(host_plans, frozen, tmp_path, monkeypatch, case):
     f = copy.deepcopy(host_plans[case])
     frozen.update(wall=f['now'], mono=100000.0)
@@ -607,3 +665,203 @@ def test_actual_candle_free_host_plan_through_native_callback_context_wire(host_
         assert len(calls) == 3 and state['wireSent'] is True
         with pytest.raises(ccxt.PermissionDenied, match='WIRE_CONTEXT_REQUIRED'):
             guard.guard_order_wire(exchange, endpoint, 'POST', body)
+
+
+@pytest.mark.parametrize('short', [False, True])
+def test_coherent_native_recomputes_supported_direction_despite_opposing_depth(frozen, tmp_path, short):
+    value = coherent_plan(tmp_path, short)
+    proof = value['entryConfirmation']['orderFlow']
+    assert assess_kev_entry_signal(proof, value['nativeEntryGuard']['mode'], value['pair'], not short, MS)['eligible']
+    with pytest.raises(FlowValidationError):
+        validate_flow(proof, value['nativeEntryGuard']['mode'], value['pair'], 'short' if short else 'long', MS)
+    exchange = fake_exchange(value['nativeEntryGuard']['mode'])
+    assert authorize(exchange, value)
+    with context(exchange, value): wire(exchange, value)
+
+
+@pytest.mark.parametrize('damage', ['plan_missing', 'plan_null', 'plan_extra', 'plan_threshold', 'guard_downgrade',
+    'plan_strip_downgrade', 'review_missing', 'review_null', 'review_threshold', 'request_downgrade',
+    'candidate_missing', 'candidate_version', 'candidate_full', 'snapshot_missing', 'snapshot_threshold'])
+def test_signal_policy_cannot_be_stripped_relabelled_or_changed_after_approval(frozen, tmp_path, damage):
+    value = coherent_plan(tmp_path)
+    folder = tmp_path / 'local/demo/runs'
+    review_path, snapshot_path = folder / (SNAPSHOT_ID+'.kev-review.json'), folder / (SNAPSHOT_ID+'.snapshot.json')
+    review, snapshot = json.loads(review_path.read_text()), json.loads(snapshot_path.read_text())
+    state, candidate = review['request']['state'], review['request']['state']['candidates'][0]
+    if damage == 'plan_missing': value.pop('entrySignalPolicy')
+    elif damage == 'plan_null': value['entrySignalPolicy'] = None
+    elif damage == 'plan_extra': value['entrySignalPolicy']['extra'] = True
+    elif damage == 'plan_threshold': value['entrySignalPolicy']['minimumDirectionalShare'] = '0.5'
+    elif damage == 'guard_downgrade': value['nativeEntryGuard']['version'] = 'kev-native-entry-v2'
+    elif damage == 'plan_strip_downgrade':
+        value.pop('entrySignalPolicy')
+        value['nativeEntryGuard']['version'] = 'kev-native-entry-v2'
+    elif damage == 'review_missing': state.pop('entrySignalPolicy')
+    elif damage == 'review_null': state['entrySignalPolicy'] = None
+    elif damage == 'review_threshold': state['entrySignalPolicy']['minimumCommonWindowMs'] = 10000
+    elif damage == 'request_downgrade': state['requestVersion'] = 'kev-flow-request-v4'
+    elif damage == 'candidate_missing': candidate.pop('entrySignalPolicyVersion')
+    elif damage == 'candidate_version': candidate['entrySignalPolicyVersion'] = 'invented-v2'
+    elif damage == 'candidate_full': candidate['entrySignalPolicy'] = dict(KEV_ENTRY_SIGNAL_POLICY)
+    elif damage == 'snapshot_missing': snapshot.pop('entrySignalPolicy')
+    elif damage == 'snapshot_threshold': snapshot['entrySignalPolicy']['minimumTradesPerHalf'] = 0
+    else: raise AssertionError(damage)
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(review_path, review)
+    write_json(snapshot_path, snapshot)
+    with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_'):
+        authorize(fake_exchange(), value)
+
+
+@pytest.mark.parametrize('remaining', ['request_version', 'snapshot_policy', 'candidate_policy'])
+def test_legacy_relabelling_cannot_hide_original_new_policy_evidence(frozen, tmp_path, remaining):
+    value = coherent_plan(tmp_path)
+    value.pop('entrySignalPolicy')
+    value['nativeEntryGuard']['version'] = 'kev-native-entry-v2'
+    folder = tmp_path / 'local/demo/runs'
+    review_path, snapshot_path = folder / (SNAPSHOT_ID+'.kev-review.json'), folder / (SNAPSHOT_ID+'.snapshot.json')
+    review, snapshot = json.loads(review_path.read_text()), json.loads(snapshot_path.read_text())
+    state = review['request']['state']
+    state.pop('entrySignalPolicy')
+    if remaining != 'request_version': state['requestVersion'] = 'kev-flow-request-v4'
+    if remaining != 'candidate_policy': state['candidates'][0].pop('entrySignalPolicyVersion')
+    if remaining != 'snapshot_policy': snapshot.pop('entrySignalPolicy')
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(review_path, review)
+    write_json(snapshot_path, snapshot)
+    with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_'):
+        authorize(fake_exchange(), value)
+
+
+@pytest.mark.parametrize('short', [False, True])
+@pytest.mark.parametrize('offset', ['0', '0.0001'])
+def test_native_current_execution_price_must_still_confirm_origin(frozen, tmp_path, short, offset):
+    value = coherent_plan(tmp_path, short)
+    origin = Decimal(value['entryConfirmation']['orderFlow']['books'][0]['bids' if short else 'asks'][0][0])
+    rate = origin + Decimal(offset) * (1 if short else -1)
+    with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_PRICE_NOT_CONTINUED'):
+        authorize(fake_exchange(value['nativeEntryGuard']['mode']), value, amount=.2, rate=str(rate))
+
+
+@pytest.mark.parametrize('short', [False, True])
+def test_approval_cannot_override_a_failed_native_common_half_signal(frozen, tmp_path, short):
+    value = coherent_plan(tmp_path, short)
+    proof = value['entryConfirmation']['orderFlow']
+    proof['trades'][0]['q'] = '1'
+    value['entryEvidence']['proofSha256'] = sha256(json.dumps(proof, separators=(',', ':')).encode()).hexdigest()
+    write_cost_fixture(tmp_path, value, proof)
+    snapshot_path = tmp_path / 'local' / value['nativeEntryGuard']['mode'] / 'runs' / (SNAPSHOT_ID+'.snapshot.json')
+    snapshot = json.loads(snapshot_path.read_text())
+    snapshot['entrySignalPolicy'] = dict(KEV_ENTRY_SIGNAL_POLICY)
+    write_json(snapshot_path, snapshot)
+    with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_TAKER_SHARE_BELOW_MINIMUM'):
+        authorize(fake_exchange(value['nativeEntryGuard']['mode']), value)
+
+
+@pytest.mark.parametrize('phase', ['context', 'wire'])
+def test_native_rechecks_new_policy_snapshot_at_each_execution_boundary(frozen, tmp_path, phase):
+    value = coherent_plan(tmp_path)
+    exchange = fake_exchange()
+    assert authorize(exchange, value)
+    def damage():
+        path = tmp_path / 'local/demo/runs' / (SNAPSHOT_ID+'.snapshot.json')
+        snapshot = json.loads(path.read_text())
+        snapshot.pop('entrySignalPolicy')
+        write_json(path, snapshot)
+    if phase == 'context':
+        damage()
+        with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_SNAPSHOT'):
+            with context(exchange, value): pass
+    else:
+        with context(exchange, value):
+            damage()
+            with pytest.raises(ccxt.PermissionDenied, match='KEV_SIGNAL_SNAPSHOT'): wire(exchange, value)
+
+
+@pytest.mark.parametrize('short', [False, True])
+@pytest.mark.parametrize('provider', ['codex-cli', 'typesafe-api'])
+def test_pinned_selected_provider_preserves_real_identity_through_all_boundaries(frozen, tmp_path, short, provider):
+    value = provider_plan(tmp_path, short, provider)
+    exchange = fake_exchange(value['nativeEntryGuard']['mode'])
+    assert authorize(exchange, value)
+    with context(exchange, value): wire(exchange, value)
+    assert value['entryEvidence']['kevReview']['provider'] == provider
+
+
+@pytest.mark.parametrize('damage', ['upstream_missing', 'upstream_model', 'upstream_choice', 'upstream_probabilities',
+    'upstream_usage', 'model_alias', 'backend_cli', 'backend_counter', 'backend_host_id', 'backend_host_time',
+    'confidence', 'zero_input', 'negative_output', 'boolean_output', 'unsafe_output', 'bad_request_id',
+    'created_before_request', 'created_after_review', 'request_model', 'response_model', 'review_model',
+    'revision_missing', 'revision_changed', 'state_provider', 'state_model', 'state_revision', 'state_extra',
+    'snapshot_provider', 'snapshot_model', 'snapshot_revision', 'receipt_revision', 'legacy_guard'])
+def test_jev_immutable_provider_and_raw_official_result_cannot_be_forged(frozen, tmp_path, damage):
+    value = provider_plan(tmp_path)
+    folder = tmp_path / 'local/demo/runs'
+    review_path, snapshot_path = folder / (SNAPSHOT_ID+'.kev-review.json'), folder / (SNAPSHOT_ID+'.snapshot.json')
+    review, snapshot = json.loads(review_path.read_text()), json.loads(snapshot_path.read_text())
+    response, state = review['response'], review['request']['state']
+    if damage == 'upstream_missing': response.pop('upstream')
+    elif damage == 'upstream_model': response['upstream']['model'] = 'jev-latest'
+    elif damage == 'upstream_choice': response['upstream']['answers']['entry']['choice'] = 'hold'
+    elif damage == 'upstream_probabilities': response['upstream']['answers']['entry']['probabilities']['q0'] = .7
+    elif damage == 'upstream_usage': response['upstream']['usage']['input_tokens'] += 1
+    elif damage == 'model_alias': response['backend']['actual_model'] = 'jev-latest'
+    elif damage == 'backend_cli': response['backend']['cli_calls'] = 1
+    elif damage == 'backend_counter': response['backend']['api_calls'] = True
+    elif damage == 'backend_host_id': response['backend']['request_id_source'] = 'remote'
+    elif damage == 'backend_host_time': response['backend']['timestamp_source'] = 'remote'
+    elif damage == 'confidence':
+        response['answers']['entry']['confidence'] = response['upstream']['answers']['entry']['confidence'] = True
+    elif damage in ('zero_input', 'negative_output', 'boolean_output', 'unsafe_output'):
+        field, number = ('input_tokens', 0) if damage == 'zero_input' else ('output_tokens',
+            -1 if damage == 'negative_output' else True if damage == 'boolean_output' else 2**53)
+        response['usage'][field] = response['upstream']['usage'][field] = number
+    elif damage == 'bad_request_id': response['request_id'] = review['requestId'] = 'invented-remote-id'
+    elif damage == 'created_before_request': response['created_at'] = iso(MS-100000)
+    elif damage == 'created_after_review': response['created_at'] = iso(MS+1)
+    elif damage == 'request_model': review['request']['model'] = 'kev-codex'
+    elif damage == 'response_model': response['model'] = 'kev-codex'
+    elif damage == 'review_model': review['actualModel'] = 'gpt-6-luna'
+    elif damage == 'revision_missing': review.pop('providerRevision')
+    elif damage == 'revision_changed': review['providerRevision'] = 'abcdef12-1234-4234-9234-123456789abc'
+    elif damage.startswith('state_'): state['decisionProvider'][damage[6:]] = 'forged'
+    elif damage.startswith('snapshot_'):
+        key = 'providerRevision' if damage == 'snapshot_revision' else damage[9:]
+        snapshot['kevEntry'][key] = 'forged'
+    elif damage == 'receipt_revision': value['entryEvidence']['kevReview']['providerRevision'] = 'forged'
+    elif damage == 'legacy_guard': value['nativeEntryGuard']['version'] = 'kev-native-entry-v2'
+    else: raise AssertionError(damage)
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(review_path, review)
+    write_json(snapshot_path, snapshot)
+    with pytest.raises(ccxt.PermissionDenied): authorize(fake_exchange(), value)
+
+
+@pytest.mark.parametrize('phase', ['context', 'wire'])
+def test_jev_provider_selection_is_rechecked_after_callback(frozen, tmp_path, phase):
+    value, exchange = provider_plan(tmp_path), fake_exchange()
+    assert authorize(exchange, value)
+    def damage():
+        path = tmp_path / 'local/demo/runs' / (SNAPSHOT_ID+'.snapshot.json')
+        snapshot = json.loads(path.read_text())
+        snapshot['kevEntry']['providerRevision'] = 'abcdef12-1234-4234-9234-123456789abc'
+        write_json(path, snapshot)
+    if phase == 'context':
+        damage()
+        with pytest.raises(ccxt.PermissionDenied, match='KEV_PROVIDER_SNAPSHOT'):
+            with context(exchange, value): pass
+    else:
+        with context(exchange, value):
+            damage()
+            with pytest.raises(ccxt.PermissionDenied, match='KEV_PROVIDER_SNAPSHOT'): wire(exchange, value)
+
+
+def test_raw_official_probabilities_do_not_coerce_json_booleans_to_numbers(frozen, tmp_path):
+    value = provider_plan(tmp_path)
+    path = tmp_path / 'local/demo/runs' / (SNAPSHOT_ID+'.kev-review.json')
+    review = json.loads(path.read_text())
+    for probabilities in (review['response']['answers']['entry']['probabilities'], review['selection']['probabilities'],
+                          review['decisions'][0]['probabilities'], value['entryEvidence']['kevReview']['selection']['probabilities'],
+                          value['entryEvidence']['kevReview']['decision']['probabilities']):
+        probabilities.update(q0=1, hold=0)
+    review['response']['upstream']['answers']['entry']['probabilities'].update(q0=True, hold=False)
+    value['nativeEntryGuard']['kevReviewSha256'] = write_json(path, review)
+    with pytest.raises(ccxt.PermissionDenied, match='JEV_UPSTREAM_IDENTITY'):
+        authorize(fake_exchange(), value)

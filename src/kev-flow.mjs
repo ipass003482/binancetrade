@@ -6,9 +6,13 @@ import {checkDemoOrderSize} from './demo-order-size.mjs';
 import {riskCostFraction} from './demo-rules.mjs';
 import {executableCostEconomics} from './trading-costs.mjs';
 import {advanceConfirmation,confirmationForEntry,KEV_CONFIRMATION_VERSION,KEV_CONFIRMATION_WINDOWS,KEV_CONFIRMATION_INTERVAL_MS} from './kev-confirmation.mjs';
+import {kevPortfolioCandidateRejection} from './kev-portfolio.mjs';
+import {KEV_NET_HARVEST_POLICY} from './kev-exit-policy.mjs';
+import {KEV_ENTRY_SIGNAL_POLICY,validKevEntrySignalPolicy,assessKevEntrySignal} from './kev-entry-signal.mjs';
+import {kevSignalQuoteRejection} from './kev-entry-contract.mjs';
 
 export const KEV_FLOW_POLICY='kev-order-flow-v1';
-export const KEV_NATIVE_VERSION='kev-native-entry-v1';
+export const KEV_NATIVE_VERSION='kev-native-entry-v3';
 export const KEV_FLOW_PARAMETERS=Object.freeze({version:'kev-flow-fixed-exits-v1',timeframe:'order-flow',
  stopFraction:.005,targetFraction:.015,maxHoldingSeconds:900,maxHoldingBars:0,riskBudgetUsdt:1});
 export const KEV_NET_MARGIN_POLICY=Object.freeze({version:'kev-net-margin-v1',minimumNetMarginBps:'10'});
@@ -29,7 +33,7 @@ const HARD_BLOCKERS=new Set([
  'FLOW_VOLATILITY_SHOCK','FLOW_LIQUIDITY_SHOCK','FLOW_SHOCK_DATA_INVALID',
  'FLOW_TAPE_BOOK_MISMATCH','FLOW_BOOK_IMBALANCE_TOO_LARGE','FLOW_MID_MOVE_NOT_CONFIRMED','KEV_NET_MARGIN_TOO_SMALL',
  'KEV_FLOW_CONFIRMATION_PENDING','KEV_FLOW_CONFIRMATION_REQUIRED',
- 'DEMO_RISK_SIZE_BELOW_EXCHANGE_MINIMUM'
+ 'DEMO_RISK_SIZE_BELOW_EXCHANGE_MINIMUM','PORTFOLIO_OPPOSITE_POSITION','PORTFOLIO_DUPLICATE_POSITION'
 ]);
 const blockerClass=reason=>HARD_BLOCKERS.has(reason)||String(reason??'').startsWith('KEV_')||String(reason??'').startsWith('FLOW_')?'hard':'soft';
 export function kevCandidateDiagnostics(candidates){
@@ -60,10 +64,14 @@ export function kevFlowQuality(snapshot,proposal,now=Date.now()){
  }catch{reasons.push('KEV_FLOW_TIMING_INVALID');}
  const flow=validateOrderFlowData(market?.orderFlow,{mode:snapshot.mode,pair:proposal.pair,now});
  const long=proposal.action!=='open-short';
- const alignment=flow.eligible?assessOrderFlow(market?.orderFlow,{mode:snapshot.mode,pair:proposal.pair,long,now,
-  minTakerShare:'.55',minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance}):null;
+ const coherent=Object.hasOwn(snapshot,'entrySignalPolicy'),validPolicy=!coherent||validKevEntrySignalPolicy(snapshot.entrySignalPolicy);
+ if(!validPolicy)reasons.push('KEV_ENTRY_SIGNAL_POLICY_MISMATCH');
+ const alignment=flow.eligible&&validPolicy?(coherent
+  ?assessKevEntrySignal(market?.orderFlow,{mode:snapshot.mode,pair:proposal.pair,long,now})
+  :assessOrderFlow(market?.orderFlow,{mode:snapshot.mode,pair:proposal.pair,long,now,
+   minTakerShare:'.55',minMidChangeBps:FLOW_SELECTIVITY.minimumMidChangeBps,maxDepthImbalance:FLOW_SELECTIVITY.maximumDepthImbalance})):null;
  if(!flow.eligible)reasons.push(flow.reason);
- else if(!alignment?.eligible)reasons.push(alignment?.reason??'FLOW_TAPE_BOOK_MISMATCH');
+ else if(validPolicy&&!alignment?.eligible)reasons.push(...(coherent?(alignment?.reasons??['KEV_SIGNAL_DATA_INVALID']):[alignment?.reason??'FLOW_TAPE_BOOK_MISMATCH']));
  const shock=flow.eligible&&alignment?.eligible?assessFlowShock(alignment,{spreadBps:market?.spreadBps}):null;
  if(shock&&!shock.eligible)reasons.push(shock.reason);
  return {eligible:reasons.length===0,reasons,metrics:{...flow,alignment},alignment,shock,
@@ -73,8 +81,10 @@ export function kevFlowQuality(snapshot,proposal,now=Date.now()){
 // Fixed prospective exit geometry, independent of candles or forecasts. The
 // price space is a plan, not an estimate that the market will reach the target.
 export function kevFlowRule({snapshot,pair,action,cost,quote,policy={},confirmation=null,confirmationRequired=false,now=Date.now()}){
+ const coherent=Object.hasOwn(snapshot,'entrySignalPolicy');
  const base={version:KEV_FLOW_POLICY,entryPolicyVersion:KEV_FLOW_POLICY,entrySignalEngine:'kev_order_flow',
-  pair,action,timeframe:'order-flow',...KEV_FLOW_PARAMETERS};
+  ...(coherent?{entrySignalPolicy:snapshot.entrySignalPolicy}:{}),
+  pair,action,timeframe:'order-flow',...KEV_FLOW_PARAMETERS,exitPolicy:{...KEV_NET_HARVEST_POLICY}};
  base.version=KEV_FLOW_POLICY;
  const hold=(reasons,extra={})=>({...base,action:'hold',reasons,...extra});
  if(!['demo','demo-futures'].includes(snapshot.mode)||!(snapshot.mode==='demo'?['buy']:['open-long','open-short']).includes(action))
@@ -82,6 +92,8 @@ export function kevFlowRule({snapshot,pair,action,cost,quote,policy={},confirmat
  const quality=kevFlowQuality(snapshot,{pair,action},now);
  if(!quality.eligible)return hold(quality.reasons,{flowDiagnostics:quality.metrics,shadowOnly:quality.shadowOnly,executionMode:quality.shadowOnly?'shadow':'blocked'});
  const market=snapshot.markets.find(m=>m.pair===pair),q=quote??market;
+ if(coherent){const reason=kevSignalQuoteRejection(market.orderFlow,q,{long:action!=='open-short'});
+  if(reason)return hold([reason],{flowDiagnostics:quality.metrics});}
  try{
   if(cost?.status!=='ok')return hold(['ENTRY_COSTS_UNAVAILABLE']);
   const required=new Decimal(cost.requiredPriceSpaceBps),fees=riskCostFraction(cost),
@@ -100,9 +112,10 @@ export function kevFlowRule({snapshot,pair,action,cost,quote,policy={},confirmat
    return hold(['KEV_NET_MARGIN_TOO_SMALL'],{flowDiagnostics:quality.metrics,shadowOnly:false,executionMode:'blocked',netMargin:{version:KEV_NET_MARGIN_POLICY.version,
     targetNetMarginBps:targetNetBps.toFixed(),quoteDriftReserveBps:driftReserveBps.toFixed(),netMarginAfterQuoteDriftBps:netAfterDriftBps.toFixed(),
     minimumNetMarginBps:minimumNetMarginBps.toFixed(),costEconomics:economics}});
-  if(confirmationRequired&&!confirmationForEntry(confirmation,{snapshot,mode:snapshot.mode,pair,action,now}))
+  if(confirmationRequired&&!coherent&&!confirmationForEntry(confirmation,{snapshot,mode:snapshot.mode,pair,action,now}))
    return hold(['KEV_FLOW_CONFIRMATION_REQUIRED'],{flowDiagnostics:quality.metrics,shadowOnly:false,executionMode:'blocked'});
   return {...base,reasons:[],requiredPriceSpaceBps:required.toFixed(),estimatedRoundTripCostBps:fees.mul(10000).toFixed(),orderFlowMetrics:quality.metrics,
+   ...(coherent?{entrySignal:quality.alignment}:{}),
    costSpace:{targetBps:'150',requiredBps:required.toFixed(),basis:'fixed_exit_plan_not_forecast'},
    netRewardRisk:{netRewardFraction:reward.toFixed(),riskFraction:risk.toFixed(),ratio:reward.div(risk).toFixed()},
    netMargin:{version:KEV_NET_MARGIN_POLICY.version,targetNetMarginBps:targetNetBps.toFixed(),quoteDriftReserveBps:driftReserveBps.toFixed(),
@@ -120,24 +133,29 @@ export function kevFlowStake(rules,cost,policy,available=policy.maxStakeUsdt){
  return Decimal.max(0,Decimal.min(policy.maxStakeUsdt,available,new Decimal(1).div(risk))).toFixed(8,Decimal.ROUND_DOWN);
 }
 
-export function kevFlowReference(snapshot,policy,account,{recentHistory=[],now=Date.now(),review,confirmationState}={}){
+export function kevFlowReference(snapshot,policy,account,{recentHistory=[],now=Date.now(),review,confirmationState,
+ portfolioEligibility,portfolioEligibilityRequired=false}={}){
  const used=account.trades.reduce((s,t)=>s+Number(t.stake_amount),0),available=Math.max(0,Number(policy.maxExposureUsdt)-used),
   cooldowns=recentLossCooldowns(recentHistory,{now}),futures=policy.mode==='demo-futures';
- const full=account.trades.length>=policy.maxOpenTrades||available<=0;
+ const full=account.trades.length>=policy.maxOpenTrades||available<=0,coherent=Object.hasOwn(snapshot,'entrySignalPolicy');
  let nextConfirmationState=confirmationState;
  const candidates=snapshot.markets.flatMap(m=>(futures?['open-long','open-short']:['buy']).map(action=>{
   const rule=kevFlowRule({snapshot,pair:m.pair,action,cost:m.entryCost,policy,now});
-  const advanced=advanceConfirmation(nextConfirmationState,{mode:snapshot.mode,pair:m.pair,action,
+  const advanced=coherent?{state:nextConfirmationState,confirmation:null}:advanceConfirmation(nextConfirmationState,{mode:snapshot.mode,pair:m.pair,action,
    snapshotId:snapshot.id,boundary:snapshot.decisionBoundary,intervalMs:snapshot.decisionIntervalMs,
    eligible:rule.action!=='hold'&&!(rule.reasons?.length),now});
   nextConfirmationState=advanced.state;
   const confirmation=advanced.confirmation;
   const reasons=[...(rule.reasons??[])];
-  if(rule.action!=='hold'&&!(rule.reasons?.length)&&!confirmation?.confirmed)reasons.push('KEV_FLOW_CONFIRMATION_PENDING');
+  if(!coherent&&rule.action!=='hold'&&!(rule.reasons?.length)&&!confirmation?.confirmed)reasons.push('KEV_FLOW_CONFIRMATION_PENDING');
   if(!policy.pairs.includes(m.pair))reasons.push('PAIR_NOT_ALLOWED');
   if(full)reasons.push('POSITION_OR_EXPOSURE_LIMIT');
   if(account.trades.some(t=>t.pair===m.pair))reasons.push('POSITION_ALREADY_EXISTS');
   if(cooldowns.has(m.pair))reasons.push('FLOW_PAIR_LOSS_COOLDOWN');
+  if(portfolioEligibilityRequired||portfolioEligibility!==undefined){
+   const portfolioReason=kevPortfolioCandidateRejection({receipt:portfolioEligibility,snapshot,pair:m.pair,action,now});
+   if(portfolioReason)reasons.push(portfolioReason);
+  }
   if((futures?m.verifiedFutures:m.verifiedSpot)!==true||!Number.isFinite(m.spreadBps)||m.spreadBps<0||m.spreadBps>policy.maxSpreadBps)
    reasons.push('QUOTE_REJECTED');
   let stakeUsdt='0',sizing;
@@ -155,10 +173,12 @@ export function kevFlowReference(snapshot,policy,account,{recentHistory=[],now=D
  const diagnostics=kevCandidateDiagnostics(candidates);
  const noSelectionReason=review?.status==='reviewed'
   ?(selected?null:(approved?.length?'KEV_ENTRY_VETO_OR_CANDIDATE_UNAVAILABLE':(review.reason??'KEV_ENTRY_VETO')))
+  :review?.status==='hold'
+  ?(review.reason??'KEV_ENTRY_VETO')
   :(diagnostics.eligible?'等待 Kev 選擇交易對與方向。':'KEV_NO_ELIGIBLE_ENTRY');
  const proposal={snapshotId:snapshot.id,action:selected?.action??'hold',pair:selected?.pair??policy.pairs[0],stakeUsdt:selected?.stakeUsdt??'0',
   evidenceIds:selected?[(futures?'futures:':'spot:')+selected.pair,'cost:'+selected.pair]:[],
- reason:selected?'Kev 依即時訂單簿與主動成交流選定交易對及方向；固定停損 0.5%、停利 1.5%、最長持倉 15 分鐘，估計風險預算 1 USDT。':
+ reason:selected?'Kev 依即時訂單簿與主動成交流選定交易對及方向；固定停損 0.5%、原止盈 1.5%、5/10 分鐘分段含費收利、最長持倉 15 分鐘，估計風險預算 1 USDT。':
    'Kev 訂單流決策：'+noSelectionReason+formatBlockers(diagnostics),
   ...(futures?{leverage:1}:{}),...(selected?.confirmation?{kevConfirmation:selected.confirmation}:{})};
  const shadowCandidates=candidates.filter(c=>c.shadowOnly).map(c=>({pair:c.pair,requestedAction:c.requestedAction,shadowReason:c.reasons?.[0]??'FLOW_TAPE_BOOK_MISMATCH',
@@ -166,5 +186,9 @@ export function kevFlowReference(snapshot,policy,account,{recentHistory=[],now=D
  return {proposal,candidates,selected:selected??null,metadata:{decisionEngine:'rules',ruleVersion:KEV_FLOW_POLICY,entryPolicyVersion:KEV_FLOW_POLICY,
    entrySignalEngine:'kev_order_flow',parameters:KEV_FLOW_PARAMETERS,llmInvoked:false,modelUsedForDecision:Boolean(selected),
    snapshotId:snapshot.id,timeframe:'order-flow',performanceSource:'demo-exchange-fills',candidateDiagnostics:diagnostics,
-   shadowCandidates,shadowPolicy:'one-sided-or-misaligned-order-flow-is-observation-only',confirmationPolicy:{version:KEV_CONFIRMATION_VERSION,requiredWindows:KEV_CONFIRMATION_WINDOWS,intervalMs:KEV_CONFIRMATION_INTERVAL_MS},confirmationState:nextConfirmationState}};
+   ...(portfolioEligibilityRequired||portfolioEligibility!==undefined?{portfolioEligibility:portfolioEligibility??null}:{}),
+   ...(coherent?{entrySignalPolicy:snapshot.entrySignalPolicy}:{}),shadowCandidates,
+   shadowPolicy:coherent?'incoherent-common-window-is-observation-only':'one-sided-or-misaligned-order-flow-is-observation-only',
+   confirmationPolicy:coherent?{version:KEV_ENTRY_SIGNAL_POLICY.version,requiredIntervals:2,basis:'same-proof-tape-and-executable-quote-response'}
+    :{version:KEV_CONFIRMATION_VERSION,requiredWindows:KEV_CONFIRMATION_WINDOWS,intervalMs:KEV_CONFIRMATION_INTERVAL_MS},confirmationState:nextConfirmationState}};
 }

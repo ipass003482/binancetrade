@@ -206,6 +206,21 @@ function kevEntry(n,at,extra={}){
     decision:{pair:'ETH/USDT',action:'buy',approved:true,choice:'select'}}},...extra};
 }
 
+test('Jev receipt is attributed distinctly without resetting the existing trial or accepting fake Kev',async()=>{
+ const local=await directory(),trial=await beginForwardTrial(local,'demo',[]),at=Date.parse(trial.startedAt);
+ const entry=kevEntry(2,at),receipt=entry.entryEvidence.kevReview;
+ Object.assign(receipt,{version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0',
+  providerRevision:'00000000-0000-4000-8000-000000000001'});
+ await recordForwardEntry(local,entry);
+ const saved=await readJson(join(local,'forward-trial.json'));
+ assert.equal(saved.startedAt,trial.startedAt);assert.deepEqual(saved.strategyTags,[tag(2)]);
+ for(const mutate of [r=>r.provider='codex-cli',r=>r.model='jev-latest',r=>delete r.providerRevision]){
+  const invalid=kevEntry(3,at);invalid.entryEvidence.kevReview={...receipt,snapshotId:invalid.snapshotId};
+  mutate(invalid.entryEvidence.kevReview);
+  await assert.rejects(recordForwardEntry(local,invalid),/FORWARD_ENTRY_NOT_ATTRIBUTABLE/);
+ }
+});
+
 test('Kev attribution requires its exact reviewed pending intent and preserves the existing trial identity',async()=>{
  const local=await directory(),old=trade(1,Date.now()-1000),first=await beginForwardTrial(local,'demo',[old]);
  const at=Date.parse(first.startedAt),entry=kevEntry(2,at);

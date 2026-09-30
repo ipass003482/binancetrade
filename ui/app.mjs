@@ -104,9 +104,10 @@ function renderDiagnostics(){
  const {data,mode,preview,error}=store.state,raw=data?.diagnostics;
  const report=!preview&&raw?.schemaVersion===1&&raw?.source==='local-demo-entry-diagnostics'&&raw.mode===mode&&
   raw.ruleVersion===data?.strategy?.ruleVersion?raw:null;
+ const warming=!preview&&data?.diagnosticsError==='DIAGNOSTICS_INDEX_WARMING';
  const count=value=>Number.isSafeInteger(value)&&value>=0?number(value,0):'—';
- text('diagnostics-window',report?(data.session?'本輪自 '+taipeiTime(report.window?.from):'最近 24 小時')+' · '+report.ruleVersion:'等待目前版本的觀測期間');
- text('diagnostics-summary',preview?'展示模式不混入實際進場統計。':error?'工作區讀取失敗，進場狀態待確認。':!report?'等待本版策略週期。':
+ text('diagnostics-window',report?(data.session?'本輪自 '+taipeiTime(report.window?.from):'最近 24 小時')+' · '+report.ruleVersion+' · 統計截至 '+taipeiTime(report.asOf):warming?'正在建立目前範圍的診斷索引':'等待目前版本的觀測期間');
+ text('diagnostics-summary',preview?'展示模式不混入實際進場統計。':error?'工作區讀取失敗，進場狀態待確認。':warming?'歷史紀錄載入中，統計筆數尚未確認；帳戶與運行狀態可先查看。':data?.diagnosticsError?'診斷資料讀取失敗，統計尚未確認：'+reasonLabel(data.diagnosticsError):!report?'等待本版策略週期。':
   '共 '+count(report.cycles?.total)+' 輪 · 完成 '+count(report.cycles?.completed)+' · 風控等待 '+count(report.cycles?.waiting)+
   ' · 異常 '+count(report.cycles?.failed)+' · 未完成 '+count(report.cycles?.incomplete)+
   '；'+count(report.candidates?.eligible)+' / '+count(report.candidates?.total)+' 個幣種候選通過訊號與下單金額檢查。'+
@@ -120,7 +121,7 @@ function renderDiagnostics(){
   for(const item of (Array.isArray(values)?values:[]).slice(0,5)){
    const row=element('li');row.append(element('span','',reasonLabel(item.reason)),element('strong','',count(item.count)+' 次'));list.append(row);
   }
-  if(!list.childElementCount)list.append(element('li','muted',report?empty:'—'));
+  if(!list.childElementCount)list.append(element('li','muted',report?empty:warming?'載入中 · 次數待確認':'—'));
  }
  text('diagnostics-latest','最新逐幣檢查 · '+taipeiTime(report?.latest?.createdAt));
  const pairs=$('diagnostics-pairs');pairs.replaceChildren();
@@ -143,7 +144,7 @@ function renderDiagnostics(){
    (pair.sizingReason?reasonLabel(pair.sizingReason):'候選下單金額 '+number(pair.stakeUsdt,4)+' USDT')));
   pairs.append(row);
  }
- if(!pairs.childElementCount)pairs.append(element('p','muted','尚無本版逐幣檢查資料。'));
+ if(!pairs.childElementCount)pairs.append(element('p','muted',warming?'載入中，逐幣檢查尚未確認。':'尚無本版逐幣檢查資料。'));
  text('diagnostics-note','每個原因在同一幣種、同一輪只計一次；技術驗證單不列入訊號統計。'+
   (report?.warnings?.length?' 有 '+report.warnings.length+' 項紀錄缺失，統計可能不完整。':'')+
   (report?.exclusions?.limited?' 僅顯示最新 288 輪。':''));

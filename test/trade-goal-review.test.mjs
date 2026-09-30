@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {entryId} from '../src/entry-identity.mjs';
-import {buildTradeGoalReview,tradeGoalMarkdown} from '../scripts/trade-goal-review.mjs';
+import {buildTradeGoalReview,tradeGoalMarkdown,reviewerAllowedForGoal} from '../scripts/trade-goal-review.mjs';
 
 const startedAt='2026-09-14T02:58:25.478Z',base=Date.parse(startedAt),observedAt='2026-09-14T12:00:00Z';
 const fingerprint='a'.repeat(64),prediction='b'.repeat(64),version='kronos-direction-v12';
@@ -358,4 +358,48 @@ test('native flow goal requires explicit non-model identity and counts only its 
  for(const modelFingerprint of [undefined,fingerprint,'bad'])assert.throws(()=>review([],[],{goal:{...g,modelFingerprint}}),/TRADE_GOAL_INVALID/);
  assert.throws(()=>review([],[],{goal:{...goal(),modelFingerprint:null}}),/TRADE_GOAL_INVALID/);
  assert.match(r.limitations[0],/^50 entries/);
+});
+
+test('provider policy is prospective and does not rewrite the goal legacy reviewer',()=>{
+ const kev={version:'kev-codex-entry-v1',provider:'codex-cli',model:'gpt-6-luna'},
+  jev={version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0'},
+  g={...goal(),kevEntry:{required:true,...kev}},effectiveFrom=new Date(base+30000).toISOString(),
+  receipt={...jev,providerRevision:snapshot(99),completedAt:effectiveFrom};
+ assert.equal(reviewerAllowedForGoal(g,receipt),false);
+ g.reviewerPolicy={version:'decision-provider-policy-v1',effectiveFrom,allowed:[jev]};
+ const before=JSON.stringify(g);
+ assert.equal(reviewerAllowedForGoal(g,receipt),true);
+ assert.equal(reviewerAllowedForGoal(g,{...receipt,completedAt:new Date(base+29999).toISOString()}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...receipt,model:'jev-latest'}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...receipt,providerRevision:undefined}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...receipt,provider:'codex-cli',version:kev.version}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...kev,completedAt:new Date(base+1).toISOString()}),true);
+ assert.equal(JSON.stringify(g),before);
+});
+
+test('exclusive Jev cohort rejects Kev approvals and requires exact post-cutover Jev identity',()=>{
+ const kev={version:'kev-codex-entry-v1',provider:'codex-cli',model:'gpt-6-luna'},
+  jev={version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0'},
+  effectiveFrom=new Date(base+30000).toISOString(),revision='537aab05-9364-424a-aa8b-d97e3ee3b5f8',
+  g={...goal(),kevEntry:{required:true,...kev},reviewerPolicy:{version:'decision-provider-policy-v1',mode:'exclusive',effectiveFrom,allowed:[jev]}},
+  jevReceipt={...jev,providerRevision:revision,completedAt:effectiveFrom},kevReceipt={...kev,completedAt:effectiveFrom};
+ assert.equal(reviewerAllowedForGoal(g,jevReceipt),true);
+ assert.equal(reviewerAllowedForGoal(g,{...jevReceipt,completedAt:new Date(base+29999).toISOString()}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...jevReceipt,model:'jev-latest'}),false);
+ assert.equal(reviewerAllowedForGoal(g,{...jevReceipt,providerRevision:undefined}),false);
+ assert.equal(reviewerAllowedForGoal(g,kevReceipt),false);
+ assert.equal(reviewerAllowedForGoal(g,{...kevReceipt,providerRevision:revision}),false);
+ assert.throws(()=>review([],[],{goal:{...g,reviewerPolicy:{...g.reviewerPolicy,mode:'additive'}}}),/TRADE_GOAL_INVALID_REVIEWER_POLICY/);
+});
+
+test('malformed, retroactive, unknown or duplicate provider policies fail goal validation',()=>{
+ const policy={version:'decision-provider-policy-v1',effectiveFrom:new Date(base+30000).toISOString(),
+  allowed:[{version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0'}]};
+ for(const change of [p=>p.effectiveFrom=new Date(base-1).toISOString(),p=>p.effectiveFrom='tomorrow',
+  p=>p.allowed.push({...p.allowed[0]}),p=>p.allowed[0].model='jev-latest',p=>p.mode='additive',p=>p.extra=true,
+  p=>p.allowed=[],p=>p.version='forged',p=>p.allowed[0].extra=true]){
+  const damaged=structuredClone(policy);change(damaged);
+  assert.throws(()=>review([],[],{goal:{...goal(),reviewerPolicy:damaged}}),/TRADE_GOAL_INVALID_REVIEWER_POLICY/);
+ }
+ assert.equal(review([],[],{goal:{...goal(),reviewerPolicy:policy}}).modes.demo.entries,0);
 });

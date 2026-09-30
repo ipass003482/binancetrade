@@ -9,6 +9,7 @@ import { assertProtectionResumeAllowed } from '../src/cli.mjs';
 import { fixture } from './fixtures.mjs';
 import { DEMO_RULE_VERSION } from '../src/demo-rules.mjs';
 import { RULE_ENGINE_VERSION } from '../src/decision.mjs';
+import { createEntryDiagnosticsReader } from '../src/entry-diagnostics.mjs';
 const now=Date.parse('2026-09-10T12:00:00.000Z'),iso=age=>new Date(now-age).toISOString();
 const temp=()=>mkdtemp(join(tmpdir(),'binance-dashboard-integration-'));
 function protection(mode='demo'){
@@ -113,4 +114,26 @@ test('session dashboard hides old artifact aggregates and uses snapshot time for
  assert.equal(d.artifactErrors.filter(x=>x.code==='ARTIFACT_OUTSIDE_DEMO_SESSION').length,3);
  await writeJson(join(local,'forward-report.json'),{startedAt:session.startedAt,netRealizedUsdt:'-.4'});
  assert.equal((await dashboardState('demo',args)).forward.netRealizedUsdt,'-.4');
+});
+
+test('slow diagnostics return explicit unknown while account and health remain available, then publish the original asOf',async t=>{
+ const base=await temp(),local=join(base,'demo'),f=await fixture();let release,blocked=true,accountReads=0,observed=now;
+ const gate=new Promise(resolve=>{release=()=>{blocked=false;resolve();};});t.after(release);
+ await writeJson(join(local,'runs','slow.snapshot.json'),{id:'slow',mode:'demo',ruleVersion:DEMO_RULE_VERSION,createdAt:iso(1000),markets:[]});
+ await writeJson(join(local,'runs','slow.rules.json'),{metadata:{ruleVersion:DEMO_RULE_VERSION},candidates:[],proposal:{action:'hold'}});
+ await writeJson(join(local,'runs','slow.outcome.json'),{mode:'demo',snapshotId:'slow',status:'failed',code:'REAL_RECORDED_FAILURE'});
+ const readDiagnostics=createEntryDiagnosticsReader({readDocument:async file=>{if(file.endsWith('.snapshot.json'))await gate;return readJson(file);}});
+ const args={local,policy:{...f.policy,mode:'demo'},session:null,client:{snapshot:async()=>{accountReads++;return f.account;},history:async()=>[]},
+  readDiagnostics,diagnosticsWaitMs:10,getTiming:async()=>null,getKevConfig:async()=>({marketData:'kronos',enabled:false}),
+  getDecision:async()=>({ruleVersion:DEMO_RULE_VERSION}),now:()=>observed,portfolioLocal:join(base,'portfolio'),supervisorLocal:join(base,'supervisor'),localFor:mode=>join(base,mode)};
+ let timer;t.after(()=>clearTimeout(timer));
+ const state=await Promise.race([dashboardState('demo',args),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('DASHBOARD_BLOCKED_BY_DIAGNOSTICS')),2000);})]);
+ clearTimeout(timer);
+ assert.equal(blocked,true);assert.equal(accountReads,1);assert.ok(state.account);assert.equal(state.operations.engineAvailable,true);
+ assert.equal(state.diagnostics,null);assert.equal(state.diagnosticsError,'DIAGNOSTICS_INDEX_WARMING');
+ release();await readDiagnostics(local,{mode:'demo',ruleVersion:DEMO_RULE_VERSION,now});observed+=1000;
+ const ready=await dashboardState('demo',args);
+ assert.equal(ready.observedAt,new Date(observed).toISOString());assert.equal(ready.diagnostics.asOf,iso(0));
+ assert.equal(ready.diagnosticsError,null);assert.equal(ready.diagnostics.cycles.failed,1);assert.equal(ready.diagnostics.cycles.hold,0);
+ assert.equal(ready.diagnostics.faultReasons[0].reason,'REAL_RECORDED_FAILURE');
 });

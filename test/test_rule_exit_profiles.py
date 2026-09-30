@@ -53,7 +53,7 @@ def fixture(version, futures=False):
 def test_current_profile_has_no_legacy_roi_and_old_open_trade_keeps_its_roi(futures):
     for version, expect_roi in [('atr15m-forward-v5', True), ('atr15m-forward-v6', False), *[(version, False) for version in PROTECTED_RULE_VERSIONS]]:
         strategy, trade, plan, now = fixture(version, futures)
-        assert strategy.version() == RULE_ENGINE_VERSION == 'demo-rule-exits-v12'
+        assert strategy.version() == RULE_ENGINE_VERSION == 'demo-rule-exits-v13'
         assert strategy.minimal_roi == {} and strategy.trailing_stop is False
         at = now + timedelta(minutes=121)
         rate = 98 if futures else 102

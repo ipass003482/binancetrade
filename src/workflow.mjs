@@ -17,6 +17,7 @@ import { collectCosts,attachCosts,loadCosts } from './trading-costs.mjs';
 import { loadDecisionConfig,rulesProposal,RULE_ENGINE_VERSION } from './decision.mjs';
 import { refreshForwardReport } from './forward-store.mjs';
 import { expectedEntryWait,dailyEntryAllowance } from './entry-wait.mjs';
+import { expectedObservationWait } from './observation-wait.mjs';
 import { isEntry } from './mode.mjs';
 import {runEntryBatch} from './batch-entry.mjs';
 import {loadVolumeExperiment,volumeAssignment} from './volume-experiment.mjs';
@@ -25,29 +26,38 @@ import {waitForModelEvidence} from './model-entry.mjs';
 import {loadKevEntryConfig,reviewKevEntries,kevBlockedPairs} from './kev-entry.mjs';
 import {KEV_FLOW_POLICY,kevFlowReference} from './kev-flow.mjs';
 import {normalizeConfirmationState} from './kev-confirmation.mjs';
-export async function runCycle({local,policy,client,signal,scheduledCandleBoundary,scheduledDecisionBoundary,collectFn=collect,analyzeFn=analyze,executeFn=execute,costsFn=collectCosts,modelEvidenceFn=waitForModelEvidence,kevReviewFn=reviewKevEntries,kevConfigFn=loadKevEntryConfig}){
+import {readKevPortfolioEligibility} from './kev-portfolio.mjs';
+export async function runCycle({local,policy,client,signal,scheduledCandleBoundary,scheduledDecisionBoundary,collectFn=collect,analyzeFn=analyze,executeFn=execute,costsFn=collectCosts,modelEvidenceFn=waitForModelEvidence,kevReviewFn=reviewKevEntries,kevConfigFn=loadKevEntryConfig,kevPortfolioFn=readKevPortfolioEligibility}){
  return lock(join(local,'cycle.lock'),async()=>{
   if(await exists(join(local,'STOP')))return {status:'stopped',message:'Entries paused; engine exits remain active'};
-  let snapshot,proposal,executionStarted=false;const runId=randomUUID(),startedAt=new Date().toISOString();
+  let snapshot,proposal,executionStarted=false,observationStage=null;const runId=randomUUID(),startedAt=new Date().toISOString();
   try{
    await healthUpdate(local,{mode:policy.mode,stage:'collecting',lastCycleStartedAt:startedAt});
-   const account=await withEntryReasons(await client.snapshot(),local);
+   observationStage='account';
+   const accountSnapshot=await client.snapshot();
+   observationStage=null;
+   const account=await withEntryReasons(accountSnapshot,local);
    const version=await captureStrategyVersion({policy,engine:account.engine});
    const decisionConfig=await loadDecisionConfig(),useRules=policy.mode!=='dry-run'&&decisionConfig.demoEngine==='rules';
    const kevConfig=useRules?await kevConfigFn({local,mode:policy.mode}):null;
    const kevFlow=useRules&&kevConfig?.marketData==='order-flow';
    if(kevFlow&&(!kevConfig.enabled||kevConfig.decisionMode!=='autonomous'))throw Error('KEV_ORDER_FLOW_ACTIVATION_REQUIRED');
    if(useRules&&account.engine?.strategy_version!==RULE_ENGINE_VERSION)throw Error('RULE_ENGINE_RESTART_REQUIRED');
+   observationStage='costs';
    const costs=await costsFn(policy);
+   observationStage=null;
    // The independent research/chain observers retain Web3 context. Flow-only
    // execution needs fresh tape/quotes and must not await unrelated web queries.
+   observationStage='market';
    snapshot=await (kevFlow&&collectFn===collect?collectOrderFlow:collectFn)(policy,{includeWeb3:!useRules});
+   observationStage=null;
    attachCosts(snapshot,costs,await loadCosts());
    snapshot.decisionEngine=useRules?'rules':'ai';
    const modelAssist=useRules&&!kevFlow&&['demo','demo-futures'].includes(policy.mode);
    if(modelAssist)snapshot.aiAssist={version:'kronos-flow-v1',enabled:true,entryMode:'ai-only',
     scope:policy.mode==='demo'?'spot-ai-entry':'futures-ai-entry',model:'kronos-small-pretrained-v1'};
    if(kevConfig?.enabled)snapshot.kevEntry={version:kevConfig.version,enabled:true,model:kevConfig.expectedModel,
+    ...(kevConfig.providerRevision?{provider:kevConfig.provider,providerRevision:kevConfig.providerRevision}:{}),
     decisionMode:kevConfig.decisionMode,role:kevConfig.decisionMode==='autonomous'?'autonomous_selection':'entry_approval'};
    if(useRules){snapshot.ruleVersion=kevFlow?KEV_FLOW_POLICY:decisionConfig.ruleVersion;snapshot.entrySignalEngine=kevFlow?'kev_order_flow':modelAssist?'kronos_ai':'sampled_order_flow';}
    if(useRules&&!kevFlow)snapshot.volumeExperiment=volumeAssignment(snapshot.candleBoundary,await loadVolumeExperiment());
@@ -82,11 +92,24 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
     :{status:'observation_only',entryAllowed:null,usedForEntryDecision:false,reason:'ORDER_FLOW_ONLY_NO_MODEL_WAIT'}):undefined;
    if(useRules)await writeJson(join(local,'runs',snapshot.id+'.model-decision.json'),modelEvidence);
    const confirmationPath=join(local,'kev-confirmation.json');
-   const confirmationState=kevFlow
+   const confirmationState=kevFlow&&!Object.hasOwn(snapshot,'entrySignalPolicy')
     ?normalizeConfirmationState(await (await exists(confirmationPath)?readJson(confirmationPath):null),{mode:policy.mode,intervalMs:snapshot.decisionIntervalMs})
     :null;
    let reference=kevFlow?kevFlowReference(snapshot,policy,account,{recentHistory,confirmationState,now:Date.parse(snapshot.completedAt??snapshot.createdAt)}):rulesProposal(snapshot,policy,account,modelEvidence,{recentHistory,now:Date.parse(snapshot.completedAt??snapshot.createdAt)});
-   if(kevFlow)await writeJson(confirmationPath,reference.metadata.confirmationState);
+   let portfolioEligibility,portfolioEligibilityRequired=false;
+   if(kevFlow&&reference.metadata.candidateDiagnostics.eligible>0){
+    // Exclude already impossible cross-mode choices before using the single
+    // Kev worker. Keep this exact advisory receipt through the second pass;
+    // it is never a replacement for the bridge's fresh locked portfolio read.
+    portfolioEligibilityRequired=true;
+    observationStage='account';
+    portfolioEligibility=await kevPortfolioFn({snapshot});
+    observationStage=null;
+    await writeJson(join(local,'runs',snapshot.id+'.portfolio-eligibility.json'),portfolioEligibility??null);
+    reference=kevFlowReference(snapshot,policy,account,{recentHistory,confirmationState:reference.metadata.confirmationState,
+     portfolioEligibility,portfolioEligibilityRequired,now:Date.now()});
+   }
+   if(kevFlow&&!Object.hasOwn(snapshot,'entrySignalPolicy'))await writeJson(confirmationPath,reference.metadata.confirmationState);
    if(kevFlow)await appendFile(join(local,'kev-shadow-signals.jsonl'),JSON.stringify({version:'kev-shadow-alignment-v1',at:new Date().toISOString(),snapshotId:snapshot.id,
     mode:policy.mode,signals:reference.metadata?.shadowCandidates??[],policy:'one-sided-order-flow-never-submits'})+'\n','utf8');
    await writeJson(join(local,'runs',snapshot.id+'.rules.json'),reference);
@@ -96,18 +119,20 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
     await writeJson(join(local,'runs',snapshot.id+'.kev-review.json'),kevReview);
     if(kevFlow){
       reference=kevFlowReference(snapshot,policy,account,{recentHistory,review:kevReview,
-       confirmationState:reference.metadata.confirmationState,now:Date.now()});
-      if(kevFlow)await writeJson(confirmationPath,reference.metadata.confirmationState);
+       confirmationState:reference.metadata.confirmationState,portfolioEligibility,portfolioEligibilityRequired,now:Date.now()});
+      if(!Object.hasOwn(snapshot,'entrySignalPolicy'))await writeJson(confirmationPath,reference.metadata.confirmationState);
     }else if(isEntry(reference.proposal.action)||kevReview.status==='reviewed'){
      reference=rulesProposal(snapshot,policy,account,modelEvidence,{recentHistory,excludedPairs:kevBlockedPairs(kevReview,policy),now:Date.now()});
      reference.proposal.reason+=(isEntry(reference.proposal.action)
-      ?(kevReview.decisionMode==='autonomous'?' Kev／Codex 自主選定本輪候選；仍須通過送單前風控。':' Kev／Codex 同意本輪候選；仍須通過送單前風控。')
-      :' Kev／Codex 未批准本輪進場：'+(kevReview.reason??'KEV_ENTRY_VETO')+'。');
+      ?(' '+(kevConfig.provider==='typesafe-api'?'Jev':'Kev／Codex')+' 選定本輪候選；仍須通過送單前風控。')
+      :' '+(kevConfig.provider==='typesafe-api'?'Jev':'Kev／Codex')+' 未批准本輪進場：'+(kevReview.reason??'KEV_ENTRY_VETO')+'。');
     }
     reference.metadata={...reference.metadata,llmInvoked:kevReview.invoked,
      kevEntry:{version:kevReview.version,decisionMode:kevReview.decisionMode??kevConfig.decisionMode,status:kevReview.status,
       reason:kevReview.reason,model:kevReview.actualModel??kevConfig.expectedModel,requestAttempted:kevReview.requestAttempted,
-      requestId:kevReview.requestId??null,approvedPairs:kevReview.approvedPairs,selection:kevReview.selection??null,usage:kevReview.usage??null}};
+      provider:kevReview.provider??'codex-cli',providerRevision:kevReview.providerRevision??null,
+      requestId:kevReview.requestId??null,approvedPairs:kevReview.approvedPairs,selection:kevReview.selection??null,
+      decisionDiagnostics:kevReview.decisionDiagnostics??null,usage:kevReview.usage??null}};
     await writeJson(join(local,'runs',snapshot.id+'.rules-reviewed.json'),reference);
    }
    if(useRules&&!kevFlow&&policy.mode==='demo')enqueueInitialSpotCandidates(local,{snapshot,reference,policy,account,strategyVersion:version,now:Date.now()});
@@ -128,7 +153,8 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
    const outcome={mode:policy.mode,at:new Date().toISOString(),startedAt,snapshotId:snapshot.id,status:'completed',result};
    await writeJson(join(local,'runs',snapshot.id+'.outcome.json'),outcome);
    await healthUpdate(local,{stage:'idle',consecutiveFailures:0,lastError:null,lastSuccessAt:outcome.at,
-    lastCycleCompletedAt:outcome.at,entryWait:null,lastDecisionStatus:result.status,timing:{...timing,consumed:true}});
+    lastCycleCompletedAt:outcome.at,entryWait:null,observationWait:null,lastObservationError:null,
+    lastDecisionStatus:result.status,timing:{...timing,consumed:true}});
    await event(local,{type:'cycle_completed',snapshotId:snapshot.id,action:proposal.action,result:result.status});
    if(policy.mode!=='dry-run'&&await exists(join(local,'forward-trial.json'))){
     try{await refreshForwardReport(local,client);await healthUpdate(local,{lastForwardError:null});}
@@ -137,6 +163,18 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
    return {snapshot:join(local,'runs',snapshot.id+'.snapshot.json'),proposal,runDir:analysis.runDir,result};
   }catch(error){
    const aborted=signal?.aborted===true;
+   const observationWait=!aborted?expectedObservationWait(error,{stage:observationStage,executionStarted}):null;
+   if(observationWait){
+    const at=new Date().toISOString();
+    await writeJson(join(local,'runs',(snapshot?.id??runId)+'.outcome.json'),{
+     mode:policy.mode,at,startedAt,snapshotId:snapshot?.id??null,...observationWait,result:observationWait});
+    // A rejected read is neither a completed decision nor a recovered fault.
+    // Keep prior success timestamps and persistent-failure counters untouched.
+    await healthUpdate(local,{stage:'waiting_data',entryWait:null,observationWait:{...observationWait,since:at},
+     lastObservationError:observationWait.reason,lastDecisionStatus:'waiting_data',lastObservationAttemptAt:at});
+    await event(local,{type:'cycle_observation_waiting',snapshotId:snapshot?.id??null,...observationWait});
+    return {...observationWait,result:observationWait};
+   }
    const wait=!aborted&&executionStarted&&isEntry(proposal?.action)?expectedEntryWait(error):null;
    if(wait){
     // A matching error message never releases an unresolved submission. The
@@ -154,7 +192,8 @@ export async function runCycle({local,policy,client,signal,scheduledCandleBounda
      await writeJson(join(local,'runs',snapshot.id+'.outcome.json'),{
       mode:policy.mode,at,startedAt,snapshotId:snapshot.id,...result,result});
      await healthUpdate(local,{stage:'waiting_risk',consecutiveFailures:0,lastError:null,lastSuccessAt:at,
-      lastCycleCompletedAt:at,lastDecisionStatus:'waiting',entryWait:{...wait,since:at},dailyEntryAllowance:allowance});
+      lastCycleCompletedAt:at,lastDecisionStatus:'waiting',entryWait:{...wait,since:at},
+      observationWait:null,lastObservationError:null,dailyEntryAllowance:allowance});
      await event(local,{type:'cycle_waiting',snapshotId:snapshot.id,action:proposal.action,...wait});
      return {status:'waiting',reason:wait.reason,resetAt:wait.resetAt,
       snapshot:join(local,'runs',snapshot.id+'.snapshot.json'),proposal,result};

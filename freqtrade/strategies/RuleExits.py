@@ -4,12 +4,13 @@ import math
 import logging
 import re
 import sys
+from decimal import Decimal, localcontext
 from pathlib import Path
 from ccxt import ROUND_DOWN, ROUND_UP, TICK_SIZE, DECIMAL_PLACES
 from freqtrade.exchange import price_to_precision
 from freqtrade.strategy import stoploss_from_absolute
 
-RULE_ENGINE_VERSION = 'demo-rule-exits-v12'
+RULE_ENGINE_VERSION = 'demo-rule-exits-v13'
 ENTRY_RULE_VERSION = 'kronos-direction-v12'
 KEV_RULE_VERSION = 'kev-order-flow-v1'
 BREAKEVEN_RULE_VERSIONS = ('atr15m-forward-v7', 'atr15m-forward-v8', 'atr15m-forward-v9')
@@ -30,7 +31,7 @@ _ALL_TRAILING_VERSIONS = (*TRAILING_RULE_VERSIONS, KEV_RULE_VERSION)
 _ALL_PROTECTED_VERSIONS = (*PROTECTED_RULE_VERSIONS, KEV_RULE_VERSION)
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from demo_model_guard import authorize_entry, clear_entry_permit, record_callback_rejection
+from demo_model_guard import authorize_entry, clear_entry_permit, record_callback_rejection, kev_exit_policy
 from demo_flow_exit import QUALITY_VERSION as FLOW_QUALITY_VERSION, POLICY as FLOW_EXIT_POLICY, STATE_KEY as FLOW_EXIT_KEY, advance as advance_flow_exit, policy_for_plan
 
 
@@ -515,9 +516,74 @@ class RuleExits:
         change = (current_rate / trade.open_rate - 1) * (-1 if trade.is_short else 1)
         if change <= -plan['stopFraction']:
             return 'rules_stop'
+        # Policy faults cannot remove the core plan's hard stop, gross target
+        # or deadline. New entries validate this policy at every native gate;
+        # a malformed persisted optional policy disables only its early exit.
+        harvest = None
+        if 'exitPolicy' in plan:
+            try:
+                harvest = kev_exit_policy(plan)
+            except ValueError:
+                self._net_harvest_failure(trade, 'POLICY_INVALID')
+        age = (current_time - trade.open_date_utc).total_seconds()
         if change >= plan['targetFraction']:
             return 'rules_target'
         holding_seconds = plan['maxHoldingSeconds'] if plan['ruleVersion'] in (*TIMED_RULE_VERSIONS, KEV_RULE_VERSION, PROBE_RULE_VERSION) else plan['maxHoldingBars'] * 900
-        if (current_time - trade.open_date_utc).total_seconds() >= holding_seconds:
+        if age >= holding_seconds:
             return 'rules_time'
+        if harvest:
+            early = self._net_harvest_exit(trade, harvest, current_time, current_rate, age)
+            if early:
+                return early
         return self._flow_invalidation_exit(trade, plan, current_time)
+
+    def _net_harvest_failure(self, trade, reason):
+        logger.error('KEV_NET_HARVEST_UNAVAILABLE pair=%s tag=%s reason=%s', trade.pair, trade.enter_tag, reason)
+        pause = getattr(getattr(getattr(self, 'dp', None), '_exchange', None), '_pause_entries', None)
+        if callable(pause):
+            try:
+                pause('KEV_NET_HARVEST_' + reason)
+            except Exception:
+                # A STOP-file I/O fault must not suppress the existing exit.
+                logger.exception('KEV_NET_HARVEST_PAUSE_FAILED pair=%s tag=%s', trade.pair, trade.enter_tag)
+
+    def _net_harvest_exit(self, trade, policy, current_time, current_rate, age):
+        """Prospective net quote trigger, never an executed-profit guarantee."""
+        try:
+            if (current_time.tzinfo is None or trade.open_date_utc.tzinfo is None
+                    or not finite_number(age) or age < 0):
+                raise ValueError('TIME_INVALID')
+            if age < policy['middleAfterSeconds']:
+                return None
+            values = (trade.amount, trade.open_rate, trade.open_trade_value, trade.fee_open, trade.fee_close, current_rate)
+            mode = str(trade.trading_mode or 'spot')
+            funding = trade.funding_fees
+            if (any(not finite_number(value) for value in values)
+                    or min(trade.amount, trade.open_rate, trade.open_trade_value, current_rate) <= 0
+                    or not 0 <= trade.fee_open < 1 or not 0 <= trade.fee_close < 1
+                    or mode not in ('spot', 'futures')
+                    or (mode == 'futures' and not finite_number(funding))
+                    or (funding is not None and not finite_number(funding))):
+                raise ValueError('ACCOUNTING_INVALID')
+            # Installed engine accounting includes actual entry fees and known
+            # funding. Do not deduct the research round-trip costs again.
+            # Reserve only the future exit leg's precommitted adverse move.
+            # This is a modeled quote hurdle, not a bounded fill guarantee.
+            with localcontext() as context:
+                context.prec = 40
+                slip = Decimal(policy['exitSlippageBps']) / 10000
+                adverse_rate = float(Decimal(str(current_rate)) * (1 + slip if trade.is_short else 1 - slip))
+            net = trade.calculate_profit(adverse_rate).profit_abs
+            if not finite_number(net):
+                raise ValueError('NET_INVALID')
+            with localcontext() as context:
+                context.prec = 40
+                late = age >= policy['lateAfterSeconds']
+                target = (Decimal(str(trade.amount)) * Decimal(str(trade.open_rate)) * Decimal(policy['lateNetBps']) / 10000
+                          if late else Decimal(policy['middleNetUsdt']))
+                if Decimal(str(net)) >= target:
+                    return 'rules_net_harvest_10bps' if late else 'rules_net_harvest_1usdt'
+            return None
+        except Exception:
+            self._net_harvest_failure(trade, 'ACCOUNTING_INVALID')
+            return None

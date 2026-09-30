@@ -41,21 +41,21 @@ export async function captureStrategyVersion({policy,analyst,engine,root=ROOT,no
  const profile=AnalystSchema.parse(analyst??await loadAnalyst());
  const files=['src/volume-experiment.mjs','config/volume-experiment.json','src/strategy-contract.mjs','src/demo-probe.mjs','src/demo-order-size.mjs','src/demo-rules.mjs','src/timeframe.mjs','src/account-facts.mjs','src/trading-costs.mjs','src/baseline.mjs','src/decision.mjs','config/costs.json','config/decision.json','scripts/demo-account-facts.py',
   'src/exchange-clock.mjs','src/entry-timing.mjs','src/strategy-version.mjs','src/analyst.mjs','src/codex.mjs','src/research.mjs','src/research-profile.mjs','src/position-context.mjs',
-  'src/entry-quality.mjs','src/workflow.mjs','src/bridge.mjs','src/entry-rejection.mjs','src/risk.mjs','src/freqtrade.mjs','src/config.mjs',
+  'src/entry-quality.mjs','src/workflow.mjs','src/health.mjs','src/observation-wait.mjs','src/decision-cost-prefetch.mjs','src/bridge.mjs','src/entry-rejection.mjs','src/risk.mjs','src/freqtrade.mjs','src/config.mjs',
   'src/mode.mjs','src/engine-config.mjs','src/candle-schedule.mjs','src/io.mjs','src/http.mjs','config/research.json','config/policy.json','config/analyst.json','requirements.windows.lock','package.json','package-lock.json',
   'prompts/analyst-'+(isFutures(policy.mode)?'futures-':'')+profile.style+'.md',
   'freqtrade/strategies/'+(isFutures(policy.mode)?'CodexDemoFutures':'CodexResearchSpot')+'.py'];
  // The quote-study helpers are statically imported by the trading runtime;
  // unlike the detached forecast observer, their code remains source-attested.
  files.push('src/adaptive-parameters.mjs','src/order-flow.mjs','src/order-flow-collector.mjs','src/spot-flow-observer.mjs','src/spot-flow-store.mjs','src/spot-candidate.mjs','src/spot-candidate-store.mjs','src/cli.mjs','scripts/demo_order_flow.py','scripts/demo_flow_exit.py','src/model-pullback.mjs','src/demo-risk.mjs','src/model-momentum.mjs','src/entry-identity.mjs','src/batch-entry.mjs');
- files.push('src/kev-entry.mjs','config/kev-entry.json');
+ files.push('src/kev-entry.mjs','src/kev-sized-exit-economics.mjs','config/kev-entry.json','src/reviewer-identity.mjs','src/decision-provider.mjs','src/jev-client.mjs','scripts/jev-secret.ps1');
  // Imported by the generated contract and the guarded runtime in every mode.
- files.push('src/kev-flow.mjs','src/kev-execution-price.mjs');
+ files.push('src/kev-flow.mjs','src/kev-confirmation.mjs','src/kev-execution-price.mjs','src/kev-portfolio.mjs','src/quote-path-archive.mjs','src/kev-exit-policy.mjs','src/kev-entry-signal.mjs','src/kev-entry-contract.mjs');
  if(['demo','demo-futures'].includes(policy.mode)&&await exists(join(root,'local',policy.mode,'kev-entry.json')))
   files.push('local/'+policy.mode+'/kev-entry.json');
  if(policy.mode==='demo')files.push('freqtrade/strategies/CodexDemoSpot.py','scripts/demo-engine.py');
  if(policy.mode==='demo-futures')files.push('scripts/demo-futures-engine.py');
- if(policy.mode!=='dry-run')files.push('freqtrade/strategies/RuleExits.py','scripts/demo_protection.py','scripts/demo_rpc_sessions.py','scripts/demo_model_guard.py','scripts/supervisor-inventory.ps1','src/protection.mjs','src/portfolio.mjs','src/portfolio-store.mjs','src/entry-wait.mjs','config/portfolio.json',
+ if(policy.mode!=='dry-run')files.push('freqtrade/strategies/RuleExits.py','scripts/demo_protection.py','scripts/demo_rpc_sessions.py','scripts/demo_model_guard.py','scripts/kev_entry_signal.py','scripts/supervisor-inventory.ps1','src/protection.mjs','src/portfolio.mjs','src/portfolio-store.mjs','src/entry-wait.mjs','config/portfolio.json',
   ...(!kevFlow&&(!flowOnly||modelAssist)?observerSources:[]));
  const sources=await Promise.all(files.sort().map(async path=>({path,sha256:hash(await readFile(join(root,path)))})));
  const contractBase={schemaVersion:1,mode:policy.mode,analyst:profile,policy:select(policy,policyFields),
@@ -69,8 +69,8 @@ export async function captureStrategyVersion({policy,analyst,engine,root=ROOT,no
   contractBase.observerProvenance=modelAssist
    ?{status:'attached',reason:aiEntry?'MODEL_AI_ENTRY_PATH':'MODEL_ASSIST_ENTRY_PATH',usedForEntryDecision:true,modelPinVerified:true,verificationOwner:'src/model-entry.mjs'}
    :{status:'not_collected',reason:'OBSERVER_PROVENANCE_OUTSIDE_ENTRY_PATH',usedForEntryDecision:false,modelPinVerified:false,verificationOwner:'src/model-watchdog.mjs'};
-  if(kevFlow)contractBase.entryAuthority={provider:'codex-cli',decisionMode:'autonomous',marketData:'order-flow',
-   role:'pair_and_direction_or_hold',verificationOwner:'src/kev-entry.mjs',nativeGuard:'kev-native-entry-v1',
+  if(kevFlow)contractBase.entryAuthority={provider:'bound_by_snapshot_and_original_review',supportedProviders:['codex-cli','typesafe-api'],decisionMode:'autonomous',marketData:'order-flow',
+   role:'pair_and_direction_or_hold',verificationOwner:'src/kev-entry.mjs',nativeGuard:'kev-native-entry-v3',entrySignalPolicy:'kev-coherent-flow-v1',
    candleInput:false,kronosInput:false};
  }
  const contract=canonical(contractBase);

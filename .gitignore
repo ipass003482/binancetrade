@@ -16,3 +16,25 @@ dist/
 .pytest_cache/
 *.pyc
 *.pyo
+
+# Local research evidence, credentials and account state must never be published.
+/work/
+.env
+.env.*
+!.env.example
+!.env.template
+credentials/
+secrets/
+*.pem
+*.key
+*.pfx
+*.p12
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm

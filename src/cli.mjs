@@ -25,6 +25,7 @@ import { nextDecisionBoundary,lastDecisionClaim,claimDecisionBoundary,closeBuffe
 import {FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS} from './entry-timing.mjs';
 import { recordEquity } from './equity.mjs';
 import { collectCosts } from './trading-costs.mjs';
+import { createDecisionCostPrefetch } from './decision-cost-prefetch.mjs';
 import { beginForwardTrial,refreshForwardReport } from './forward-store.mjs';
 import { FLOW_ONLY_PARAMETERS as DEMO_PARAMETERS,DEMO_RULE_VERSION } from './demo-rules.mjs';
 import { refreshPortfolio } from './portfolio-store.mjs';
@@ -48,7 +49,7 @@ async function saveResearch(){
  const snapshot=await collect(await loadPolicy(mode)),file=join(LOCAL,'runs',snapshot.id+'.snapshot.json');
  await writeJson(file,snapshot);return {snapshot,file};
 }
-async function cycle(signal,scheduledDecisionBoundary){return runCycle({local:LOCAL,policy:await loadPolicy(mode),client:await client(),signal,scheduledDecisionBoundary});}
+async function cycle(signal,scheduledDecisionBoundary,{costsFn}={}){return runCycle({local:LOCAL,policy:await loadPolicy(mode),client:await client(),signal,scheduledDecisionBoundary,costsFn});}
 export async function assertProtectionResumeAllowed(selectedMode,{localFor=modeLocal}={}){
  if(selectedMode==='dry-run')return;
  if(!['demo','demo-futures'].includes(selectedMode))throw Error('MODE_REJECTED');
@@ -87,6 +88,7 @@ async function watch(){
   const forwardClient=mode==='dry-run'?null:await client();
   if(forwardClient)await beginForwardTrial(LOCAL,mode,await forwardClient.history(),{ruleVersion:DEMO_RULE_VERSION,parameters:DEMO_PARAMETERS});
   const abort=new AbortController(),stop=()=>abort.abort();
+  const costPrefetch=mode==='dry-run'?null:createDecisionCostPrefetch();
   process.once('SIGINT',stop);process.once('SIGTERM',stop);
   let pending=Promise.resolve();
   const heartbeat=()=>{pending=pending.then(()=>writeJson(join(LOCAL,'watch-heartbeat.json'),{pid:process.pid,at:new Date().toISOString()})).catch(()=>{});};
@@ -115,14 +117,17 @@ async function watch(){
     let boundary;const closeBuffer=closeBufferMs(mode,schedule);
     if(mode!=='dry-run'){
      boundary=nextDecisionBoundary(Date.now(),await lastDecisionClaim(LOCAL),mode,schedule);
+     const prefetchPolicy=await loadPolicy(mode);
      await healthUpdate(LOCAL,{stage:'waiting_decision',nextResearchAt:new Date(boundary+closeBuffer).toISOString()});
      while(Date.now()<boundary+closeBuffer&&!abort.signal.aborted&&!await exists(join(LOCAL,'STOP'))){
+      costPrefetch.prepare({policy:prefetchPolicy,boundary,collectionAt:boundary+closeBuffer});
       try{await delay(Math.min(1000,boundary+closeBuffer-Date.now()),null,{signal:abort.signal});}catch{break;}
      }
      if(abort.signal.aborted||await exists(join(LOCAL,'STOP')))break;
      if(!await claimDecisionBoundary(LOCAL,boundary,Date.now(),mode,schedule))continue;
     }
-    try{out(await cycle(abort.signal,boundary));}
+    try{out(await cycle(abort.signal,boundary,costPrefetch?{costsFn:policy=>
+     costPrefetch.consume({policy,boundary,collectionAt:boundary+closeBuffer})}:{}));}
     catch(e){out({status:'cycle_failed',error:safeError(e)});}
     if(mode!=='dry-run')continue;
     const end=Date.now()+(await loadPolicy(mode)).intervalSeconds*1000;
@@ -132,7 +137,7 @@ async function watch(){
    }
   }finally{
    clearInterval(timer);clearInterval(equityTimer);clearInterval(portfolioTimer);
-   await stopFlow();await pending;await Promise.allSettled([equityTask,portfolioTask]);
+   await stopFlow();await pending;await Promise.allSettled([equityTask,portfolioTask,costPrefetch?.drain()]);
    process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
   }
  });

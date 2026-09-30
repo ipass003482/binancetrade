@@ -5,6 +5,7 @@ import {demoRiskPolicy} from './demo-risk.mjs';
 import {ADAPTIVE_FLOW_VERSION,ADAPTIVE_FLOW_BOUNDS} from './adaptive-parameters.mjs';
 import {FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS,AI_ENTRY_CADENCE_VERSION,AI_ENTRY_INTERVAL_MS,AI_ENTRY_WINDOW_MS} from './entry-timing.mjs';
 import {KEV_FLOW_POLICY,KEV_NATIVE_VERSION,KEV_FLOW_PARAMETERS} from './kev-flow.mjs';
+import {KEV_ENTRY_SIGNAL_POLICY} from './kev-entry-signal.mjs';
 
 export function demoStrategyContract(policy,snapshot={}){
  if(!['demo','demo-futures'].includes(policy.mode))throw Error('DEMO_CONTRACT_MODE_REQUIRED');
@@ -15,7 +16,8 @@ export function demoStrategyContract(policy,snapshot={}){
    ?{long:'buy',short:null,closeLong:'sell',closeShort:null,shortStatus:'unavailable_on_binance_spot_demo',shortReason:'SPOT_SHORT_REQUIRES_MARGIN'}
    :{long:'open-long',short:'open-short',closeLong:'close-long',closeShort:'close-short',shortStatus:'available_on_usdt_perpetual_demo'},
   decisionEngine:'rules',analystRole:'review_only',
-  kevEntryReview:{version:'kev-codex-entry-v1',enabled:snapshot.kevEntry?.enabled===true,
+  kevEntryReview:{version:snapshot.kevEntry?.version??'kev-codex-entry-v1',enabled:snapshot.kevEntry?.enabled===true,
+   provider:snapshot.kevEntry?.provider??'codex-cli',providerRevision:snapshot.kevEntry?.providerRevision??null,
    activation:'Per-mode local/kev-entry.json; activation and config are included in the entry-time source fingerprint.',
    model:snapshot.kevEntry?.model??null,decisionMode:snapshot.kevEntry?.decisionMode??'approval',
    role:'approve/veto existing native-eligible candidates or autonomously select one candidate when configured',
@@ -57,7 +59,7 @@ export function demoStrategyContract(policy,snapshot={}){
   sizing:{riskBudgetUsdt:DEMO_RISK_BUDGET_USDT,maxStakeUsdt:policy.maxStakeUsdt,riskPolicy:demoRiskPolicy(policy.mode),
    method:'Divide the fixed maximum 1 USDT stress-risk budget by stopFraction + estimatedRoundTripCostBps/10000 + native reserve; cap by exposure/stake and reject undersized orders. Spot reserves 50bps for its stop-limit interval. This is not a guaranteed loss ceiling.',
    leverage:1,maxEntriesPerDay:policy.maxEntriesPerDay===0?'unlimited':policy.maxEntriesPerDay},
-  exits:{owner:'native_engine',nativeVersion:'demo-rule-exits-v12',stopPriceVersion:'stable-unarmed-stop-v1',
+  exits:{owner:'native_engine',nativeVersion:'demo-rule-exits-v13',stopPriceVersion:'stable-unarmed-stop-v1',
    stopPrecision:'Retain tighter existing stops without conversion drift; never widen them.',
    plan:'Each position retains its original stop, target, time limit and profit protection. Existing v11 positions retain their original plan. New AI plans use 2 ATR target, 1 ATR stop capped at 2%, net-profit trailing and four-hour maximum hold. Historical flow exits remain attached only to their recorded plans.',
    accounting:'Trailing uses recorded net-profit peak and fees/funding. Slippage, gaps and stop-limit non-fills may exceed planned loss. Actual fills alone establish realized PnL.'}
@@ -66,7 +68,9 @@ export function demoStrategyContract(policy,snapshot={}){
 function kevFlowContract(policy,snapshot){
  const legacy=demoStrategyContract({...policy,entryPolicyVersion:undefined}),model=snapshot.kevEntry?.model??null;
  return {...legacy,version:3,ruleVersion:KEV_FLOW_POLICY,entryPolicyVersion:KEV_FLOW_POLICY,entrySignalEngine:'kev_order_flow',
-  kevEntryReview:{...legacy.kevEntryReview,enabled:snapshot.kevEntry?.enabled===true,model,decisionMode:'autonomous',
+  kevEntryReview:{...legacy.kevEntryReview,version:snapshot.kevEntry?.version??'kev-codex-entry-v1',
+   provider:snapshot.kevEntry?.provider??'codex-cli',providerRevision:snapshot.kevEntry?.providerRevision??null,
+   enabled:snapshot.kevEntry?.enabled===true,model,decisionMode:'autonomous',
    role:'Choose one verified pair and direction from fresh order-book and taker-trade observations, or HOLD.',
    cadence:'At most one bounded request per fresh minute with cost/risk-eligible candidates; no request for exits.',
    limits:'Spot buy or HOLD; futures long, short or HOLD. No order submission, size/stop changes, guard bypass or profit guarantee.'},
@@ -78,26 +82,27 @@ function kevFlowContract(policy,snapshot){
   decisionCadence:{version:FLOW_DECISION_CADENCE_VERSION,intervalMs:FLOW_DECISION_INTERVAL_MS,
    entryVersion:KEV_FLOW_POLICY,entryIntervalMs:FLOW_DECISION_INTERVAL_MS,entryWindowMs:FLOW_DECISION_INTERVAL_MS,
    candleTimeframe:null,atrTimeframe:null,rule:'Fresh minute decisions expire at the next minute. Every minute is eligible without waiting for a K-line close. Sampling is REST, not subsecond exchange execution.'},
-  parameters:KEV_FLOW_PARAMETERS,
+  parameters:KEV_FLOW_PARAMETERS,entrySignalPolicy:KEV_ENTRY_SIGNAL_POLICY,
   execution:{version:'per-pair-cycle-v1',policy:'Only the single Kev-approved pair/direction can enter, after independent risk and native protection checks. Submission is not a fill.'},
   model:{checkpoint:null,model,role:'kev_order_flow_entry_authority',usedForEntryDecision:true,
-   weights:'Kev-format decision service uses Codex CLI; no local Kev weights or Kronos prediction is required.',
+   weights:snapshot.kevEntry?.provider==='typesafe-api'?'Pinned Jev model via official TypeSafe HTTPS API; original upstream answer retained.':'Kev-format decision service uses Codex CLI; no local Kev weights or Kronos prediction is required.',
    quality:'Missing, malformed, tied, expired or unavailable decision means HOLD. Choice probabilities are uncalibrated.'},
   modelAssist:{version:'kronos-flow-v1',enabled:false,scope:'independent research only',role:'no entry authority',rule:'Kronos predictions are not requested by this entry route.',authority:'No candle or forecast gate.'},
   entries:{actions:policy.mode==='demo'?['buy']:['open-long','open-short'],
    direction:'Kev chooses the pair and direction, or HOLD, from all fresh candidates that pass data, cost, capacity and risk checks.',
    momentum:'Short-term raw-trade price changes are decision context; no candle momentum gate.',averages:'No moving-average entry gate.',
-   volume:'Raw taker trades and order-book depth are model context; no deterministic directional flow threshold.',breakout:'No breakout or pullback gate.',
-   confirmation:KEV_NATIVE_VERSION+' verifies the stored Kev approval, snapshot, data proof, clock, minute expiry, quote, fixed exits, costs and risk at callback, context and wire.',
+   volume:'The complete 60-second tape is validated before selecting the common book0-to-tape-end window. At least 55% directional notional overall and more than 50% in each half; all original trade IDs and times retained.',breakout:'No breakout or pullback gate.',
+   confirmation:KEV_NATIVE_VERSION+' independently verifies the exact kev-coherent-flow-v1 policy, stored Kev approval, raw common-window proof, two non-adverse bid/ask intervals, final favorable bid and ask, fresh executable price, clock, minute expiry, fixed exits, costs and risk at callback, context and wire. Static depth-sign unanimity and two disconnected minute windows are not required.',
    costs:'The fixed 150bps target must cover complete round-trip cost plus 30bps buffer; planned net reward must exceed planned stop risk. Target space is not a forecast.',
    selection:'Kev autonomously chooses one pair and side or HOLD; no Kronos candidate filtering or deterministic directional ranking.',netRewardRiskGate:true},
-  exits:{...legacy.exits,plan:'Each existing position retains its original plan. New Kev plans use a fixed 0.5% stop, 1.5% target, native net-profit trailing and 15-minute maximum hold. Native exits never wait for Kev.'}};
+  exits:{...legacy.exits,plan:'Each existing position retains its original plan. New Kev plans keep the fixed 0.5% stop, 1.5% target, native net-profit trailing and 15-minute cap. Their immutable kev-net-harvest-v1 policy also permits net $1 after 300 seconds or 10bps of filled entry notional after 600 seconds, evaluated with an extra 5bps adverse exit allowance. Fees and funding are counted once. This is a prospective hypothesis, not established profitability. Native exits never wait for Kev.'}};
 }
 export function renderDemoStrategyContract(contract){
  if(contract.entryPolicyVersion===KEV_FLOW_POLICY)return ['# Host-generated Demo strategy contract',
-  'Kev 直接使用即時訂單簿、主動買賣成交與短期價格變化選交易對、方向或 HOLD。現貨只做多；合約可做多或做空。',
-  '每分鐘重新判斷，不收集 K 線或 ATR，不等待 Kronos 預測。一次候選合併成一次 CLI 請求；過期、格式錯誤或服務不可用即 HOLD。',
-  '資料、報價、完整成本、倉位、風險及原生保護仍須通過。新倉固定停損 0.5%、停利 1.5%、最長持倉 15 分鐘，估算風險預算最高 1 USDT；此預算不是最大損失保證。',
+  (contract.kevEntryReview.provider==='typesafe-api'?'Jev':'Kev')+' 直接使用即時訂單簿、主動買賣成交與短期價格變化選交易對、方向或 HOLD。現貨只做多；合約可做多或做空。',
+  '每分鐘重新判斷，不收集 K 線或 ATR，不等待 Kronos 預測。一次候選合併成一次模型請求；過期、格式錯誤或服務不可用即 HOLD。',
+  '新版核心把成交與三本訂單簿對齊：共同時間窗整體主動成交同向至少 55%，前後半各超過 50%，買賣報價兩段不逆向且最後雙邊價格前進。掛單量符號只作背景；同窗兩段確認取代跨分鐘等待，價格未確認仍不進場。',
+  '資料、報價、完整成本、倉位、風險及原生保護仍須通過。新倉固定停損 0.5%、原止盈 1.5%、最長持倉 15 分鐘；另可在 300 秒後淨利 1 USDT、600 秒後淨利達成交本金 10bps 時退出，先預留出場 5bps 滑價。估算風險預算最高 1 USDT，不是最大損失保證。',
   '原有持倉保留原計畫，停損與平倉不等待 Kev。以實際成交和費後損益評估，不以模型機率、目標價格或交易次數當作獲利證據。',
   JSON.stringify(contract)].join('\n\n');
  return ['# Host-generated Demo strategy contract',

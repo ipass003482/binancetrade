@@ -20,6 +20,40 @@ const canonical=value=>JSON.stringify(value,(_,v)=>v&&typeof v==='object'&&!Arra
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const errorCode=error=>/^[A-Z][A-Z0-9_]{2,80}/.exec(String(error?.code??error?.message??''))?.[0]??'REVIEW_FAILED';
 const positive=value=>typeof value==='number'&&Number.isFinite(value)&&value>0;
+const JEV={version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0'};
+const KEV={version:'kev-codex-entry-v1',provider:'codex-cli',model:'gpt-6-luna'};
+const providerTriple=(value,expected)=>value?.version===expected.version&&value.provider===expected.provider&&value.model===expected.model;
+const exactProvider=value=>value&&typeof value==='object'&&!Array.isArray(value)&&
+ Object.keys(value).sort().join('|')==='model|provider|version'&&(providerTriple(value,JEV)||providerTriple(value,KEV));
+function validReviewerPolicy(policy,startedAt){
+ const expectedKeys=['allowed','effectiveFrom','version',...(policy&&Object.hasOwn(policy,'mode')?['mode']:[])].sort().join('|');
+ return Boolean(policy&&typeof policy==='object'&&!Array.isArray(policy)&&Object.keys(policy).sort().join('|')===expectedKeys&&
+  policy.version==='decision-provider-policy-v1'&&typeof policy.effectiveFrom==='string'&&/T.*(?:Z|[+-]\d\d:\d\d)$/.test(policy.effectiveFrom)&&
+  time(policy.effectiveFrom)&&Date.parse(policy.effectiveFrom)>=Date.parse(startedAt)&&Array.isArray(policy.allowed)&&
+  policy.allowed.length>0&&policy.allowed.every(exactProvider)&&new Set(policy.allowed.map(canonical)).size===policy.allowed.length&&
+  (!Object.hasOwn(policy,'mode')||policy.mode==='exclusive'));
+}
+
+// Additive, prospective provider membership; an old goal never implicitly
+// authorizes another reviewer merely because the journal contains its label.
+export function reviewerAllowedForGoal(goal,receipt){
+ if(!receipt||typeof receipt!=='object')return false;
+ const policy=goal?.reviewerPolicy;
+ if(policy?.mode==='exclusive'){
+  if(!validReviewerPolicy(policy,goal.startedAt)||!time(receipt.completedAt)||
+   Date.parse(receipt.completedAt)<Date.parse(policy.effectiveFrom)||!policy.allowed.some(p=>providerTriple(receipt,p)))return false;
+  if(providerTriple(receipt,JEV))return UUID.test(receipt.providerRevision??'');
+  return providerTriple(receipt,KEV)&&goal.kevEntry?.required===true&&providerTriple(receipt,goal.kevEntry)&&
+   (receipt.providerRevision===undefined||UUID.test(receipt.providerRevision));
+ }
+ if(receipt.version==='kev-codex-entry-v1'&&receipt.provider==='codex-cli'&&receipt.model!=='jev-1.13.0'){
+  if(goal.kevEntry?.required!==true)return typeof receipt.model==='string'&&receipt.model.length>0;
+  if(providerTriple(receipt,goal.kevEntry))return true;
+ }
+ return validReviewerPolicy(policy,goal.startedAt)&&time(receipt.completedAt)&&
+  Date.parse(receipt.completedAt)>=Date.parse(policy.effectiveFrom)&&policy.allowed.some(p=>providerTriple(receipt,p))&&
+  UUID.test(receipt.providerRevision??'');
+}
 
 function validateGoal(goal,observedAt){
  const nativeFlow=['order-flow-only-v1','kev-order-flow-v1'].includes(goal?.entryPolicyVersion);
@@ -29,6 +63,7 @@ function validateGoal(goal,observedAt){
   !Number.isSafeInteger(goal.targetPerMode)||goal.targetPerMode<1||goal.deadline!==null)
   throw Error('TRADE_GOAL_INVALID');
  if(goal.entryPolicyVersion==='kev-order-flow-v1'&&goal.ruleVersion!=='kev-order-flow-v1')throw Error('TRADE_GOAL_INVALID');
+ if(Object.hasOwn(goal,'reviewerPolicy')&&!validReviewerPolicy(goal.reviewerPolicy,goal.startedAt))throw Error('TRADE_GOAL_INVALID_REVIEWER_POLICY');
  if(goal.kevOrderFlowAmendment&&(goal.kevOrderFlowAmendment.ruleVersion!=='kev-order-flow-v1'||
   !time(goal.kevOrderFlowAmendment.effectiveAt)||Date.parse(goal.kevOrderFlowAmendment.effectiveAt)<Date.parse(goal.startedAt)))
   throw Error('TRADE_GOAL_INVALID_AMENDMENT');
@@ -39,12 +74,13 @@ function validateGoal(goal,observedAt){
  }
 }
 
-function kevReceiptValid(pending){
+function kevReceiptValid(goal,pending){
  const evidence=pending.entryEvidence,receipt=evidence?.kevReview,d=receipt?.decision;
  return pending.model==null&&pending.ruleVersion==='kev-order-flow-v1'&&pending.entrySignalEngine==='kev_order_flow'&&
   evidence?.version==='kev-order-flow-evidence-v1'&&
   evidence.usedForEntryDecision===true&&evidence.snapshotId===pending.snapshotId&&HEX.test(evidence.proofSha256??'')&&
-  receipt?.version==='kev-codex-entry-v1'&&receipt.provider==='codex-cli'&&receipt.decisionMode==='autonomous'&&
+  reviewerAllowedForGoal(goal,receipt)&&receipt.decisionMode==='autonomous'&&
+  (receipt.providerRevision===undefined||UUID.test(receipt.providerRevision))&&
   receipt.snapshotId===pending.snapshotId&&['snapshotSha256','configSha256','proofSha256'].every(k=>HEX.test(receipt[k]??''))&&
   typeof receipt.model==='string'&&receipt.model.length>0&&typeof receipt.requestId==='string'&&receipt.requestId.length>0&&
   receipt.probabilitiesCalibrated===false&&d?.approved===true&&d.pair===pending.pair&&d.action===pending.action&&d.choice==='select'&&
@@ -169,7 +205,7 @@ function reviewMode({goal,history,journal,mode,observedAt}){
    key(state.tradeId)!==id||state.tag!==trade.enter_tag||state.pair!==trade.pair||state.action!==expectedAction||
    pending.tag!=='codex-'+state.id||Date.parse(pending.at)<start)reason='ENTRY_SUBMISSION_NOT_CONFIRMED';
   else if(!UUID.test(pending.snapshotId??'')||recordedEntryId(pending)!==state.id)reason='ENTRY_IDENTITY_MISMATCH';
-  else if(kevFlow?!kevReceiptValid(pending):flowOnly?(pending.model!=null||pending.entrySignalEngine!=='sampled_order_flow'||pending.entryRoute!=='order-flow'||
+  else if(kevFlow?!kevReceiptValid(goal,pending):flowOnly?(pending.model!=null||pending.entrySignalEngine!=='sampled_order_flow'||pending.entryRoute!=='order-flow'||
    pending.entryEvidence?.version!=='order-flow-evidence-v1'||pending.entryEvidence?.usedForEntryDecision!==true||
    pending.entryEvidence?.snapshotId!==pending.snapshotId||!HEX.test(pending.entryEvidence?.proofSha256??'')||!pending.riskPolicy):
    (pending.model?.modelFingerprint!==goal.modelFingerprint||pending.model?.usedForEntryDecision!==true||

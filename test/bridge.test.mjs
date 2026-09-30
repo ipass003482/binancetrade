@@ -18,6 +18,20 @@ test('successful request is persisted and same snapshot cannot be replayed',asyn
  await assert.rejects(execute(f),/ALREADY_CONSUMED/);assert.equal(f.calls,1);
  const r=await journalRead(join(f.local,'orders.jsonl'));assert.deepEqual(r.map(x=>x.status),['pending','submitted']);
 });
+test('Kev HOLD journals its reason, qualified count, freshness and selection audit without submitting',async()=>{
+ const f=await context();f.snapshot.entryPolicyVersion='kev-order-flow-v1';
+ f.proposal={...f.proposal,action:'hold',stakeUsdt:'0',reason:'KEV_NO_ELIGIBLE_ENTRY'};
+ const decisionDiagnostics={version:'kev-decision-audit-v1',decisionStyle:'balanced',
+  qualifiedCandidateCount:0,presentedCandidateCount:0,kevChoice:null,selectedPair:null,selectedAction:null,
+  kevSelectedQualified:false,holdReason:'KEV_NO_ELIGIBLE_ENTRY',dataFreshness:[],candidatePool:{eligibleBeforeKev:0,blockers:[{reason:'FLOW_TAPE_BOOK_MISMATCH',count:2}]}};
+ const result=await execute({...f,kevReview:{reason:'KEV_NO_ELIGIBLE_ENTRY',decisionDiagnostics}});
+ assert.equal(result.status,'hold');assert.equal(f.calls,0);
+ const [row]=await journalRead(join(f.local,'orders.jsonl'));
+ assert.equal(row.status,'hold');assert.equal(row.kevReviewReason,'KEV_NO_ELIGIBLE_ENTRY');
+ assert.equal(row.kevDecisionDiagnostics.qualifiedCandidateCount,0);
+ assert.equal(row.kevDecisionDiagnostics.holdReason,'KEV_NO_ELIGIBLE_ENTRY');
+ assert.equal(row.kevDecisionDiagnostics.candidatePool.blockers[0].reason,'FLOW_TAPE_BOOK_MISMATCH');
+});
 test('timeout is unknown, blocks retries AND later snapshots',async()=>{
  const f=await context();f.client.submit=async()=>{throw new Error('Timeout');};
  await assert.rejects(execute(f),/Timeout/);

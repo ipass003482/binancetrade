@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f3f6f8"><title>審核器設定 · Binance trade</title><link rel="stylesheet" href="/settings.css"></head>
+<body>
+<a class="skip" href="#main">跳至設定</a>
+<header class="site-header"><a class="brand" href="/">Binance trade <span>RESEARCH DESK</span></a><a class="back" href="/">返回交易總覽</a></header>
+<main id="main">
+ <div class="heading"><p class="eyebrow">WORKSPACE SETTINGS</p><h1>審核器設定</h1><p class="lead">選擇新交易決策的審核器，現有交易計畫仍依原設定執行。</p></div>
+ <section class="active-card" aria-labelledby="active-title"><div><p id="active-title" class="eyebrow">目前使用</p><h2 id="active-provider">讀取中</h2><p id="active-model" class="mono">等待設定資料</p></div><div class="active-meta"><span id="active-badge" class="badge">尚未確認</span><p id="changed-at">更新時間待確認</p><button id="refresh-status" class="text-button" type="button">重新讀取</button></div></section>
+ <div id="settings-message" class="message" role="status" aria-live="polite">正在讀取本機設定…</div>
+ <div class="settings-grid">
+  <section class="card" aria-labelledby="key-title"><div class="section-title"><span class="step">01</span><div><h2 id="key-title">設定 Jev 金鑰</h2><p>TypeSafe 官方服務 · <span class="mono">jev-1.13.0</span></p></div></div>
+   <div class="key-state"><span>最新儲存的金鑰</span><strong id="key-state">尚未確認</strong></div>
+   <form id="jev-key-form" novalidate><label for="jev-api-key">Jev API key</label><div class="password-field"><input id="jev-api-key" type="password" name="jev-api-key" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="4096" aria-describedby="key-help" disabled><button id="toggle-key" type="button" aria-controls="jev-api-key" aria-pressed="false" disabled>顯示</button></div><p id="key-help" class="hint">金鑰只送至本機設定服務，加密儲存後向 TypeSafe 驗證。送出後會立即清空欄位，不存入瀏覽器儲存空間。</p><button id="save-key" class="primary" type="submit" disabled>儲存並驗證金鑰</button></form>
+   <p id="verified-at" class="detail">尚無驗證時間</p><p class="note">驗證會確認官方模型清單的存取權限。儲存或更換金鑰不會切換目前審核器；驗證完成後，請在選擇審核器區塊選擇 Jev。</p>
+  </section>
+  <section class="card" aria-labelledby="choose-title"><div class="section-title"><span class="step">02</span><div><h2 id="choose-title">選擇審核器</h2><p>切換只影響之後的新決策</p></div></div>
+   <div class="provider-option"><div><h3>Kev <span id="kev-current" class="current-label" hidden>使用中</span></h3><p>目前工作區的本機審核服務</p></div><button id="switch-kev" class="secondary" type="button" disabled>切換到 Kev</button></div>
+   <div class="provider-option"><div><h3>Jev <span id="jev-current" class="current-label" hidden>使用中</span></h3><p>TypeSafe · <span class="mono">jev-1.13.0</span></p></div><button id="switch-jev" class="secondary" type="button" disabled>切換到 Jev</button><p id="jev-switch-help" class="hint">請先儲存並驗證 Jev API key。</p></div>
+   <div class="guard-note"><h3>交易保護持續有效</h3><p>原有停損、部位風險、成本檢查與成交驗證維持原規則。切換不會送出訂單，也不會重設本輪目標或更動既有部位。</p></div>
+  </section>
+ </div>
+ <footer>本機設定 · 127.0.0.1:18100 <span>時間以 Asia/Taipei 顯示</span></footer>
+</main>
+<script type="module" src="/settings.mjs"></script>
+</body></html>

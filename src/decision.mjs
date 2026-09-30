@@ -9,7 +9,7 @@ import { demoStrategyContract } from './strategy-contract.mjs';
 import {volumeMinimum} from './volume-experiment.mjs';
 import {demoRiskPolicy} from './demo-risk.mjs';
 import {FLOW_SELECTIVITY,FLOW_LOSS_COOLDOWN_VERSION,FLOW_LOSS_COOLDOWN_MS,recentLossCooldowns} from './order-flow.mjs';
-export const RULE_ENGINE_VERSION='demo-rule-exits-v12';
+export const RULE_ENGINE_VERSION='demo-rule-exits-v13';
 // Reject a config-only AI switch that bypasses structured Demo entry/exit plans.
 export const DecisionConfigSchema=z.object({version:z.literal(1),demoEngine:z.literal('rules'),ruleVersion:z.literal(DEMO_RULE_VERSION)}).strict();
 const Config=DecisionConfigSchema;

@@ -7,10 +7,12 @@ export const CLOSE_BUFFER_MS=5000;
 // Demo futures may revise the just-closed volume/close for several seconds.
 // The measured 5s->10s revisions motivate a 15s collection start, while all
 // model/native first-minute expiry checks remain unchanged.
-// The Kev adapter is single-flight. Stagger its two Demo markets while
-// preserving the existing minute expiry; this adds no retry or extra lifetime.
+// Kev order-flow uses fresh tape, not the just-closed futures candle. Start
+// futures soon after spot so both modes have time for the same bounded review
+// and native checks before the unchanged minute deadline. The shared Kev
+// service may still reject a concurrent request; that remains a safe HOLD.
 export function closeBufferMs(mode,{entryPolicyVersion}={}){
- return mode==='demo-futures'?(entryPolicyVersion==='kev-order-flow-v1'?30000:15000):CLOSE_BUFFER_MS;
+ return mode==='demo-futures'?(entryPolicyVersion==='kev-order-flow-v1'?10000:15000):CLOSE_BUFFER_MS;
 }
 export const START_GRACE_MS=60000;
 export function cycleTimingLimits(mode,{health={},continuous={},timeframe}={}){

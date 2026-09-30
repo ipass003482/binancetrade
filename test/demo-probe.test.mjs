@@ -19,7 +19,7 @@ async function setup(){
   costFacts:{mode,kind:'costs',readOnly:true,source:market.source,observedAt:new Date(now).toISOString(),rates:[{pair:spec.pair,status:'ok',buyRate:'.001',sellRate:'.001'}]}};
  const proposal={snapshotId:snapshot.id,action:spec.action,pair:spec.pair,stakeUsdt:'25',evidenceIds:['spot:'+spec.pair],reason:'Explicit synthetic execution probe'};
  let sends=0;
- const engine={strategy_version:'demo-rule-exits-v12'},client={snapshot:async()=>({...f.account,engine}),submit:async(p,tag,id,{beforeSend})=>{await beforeSend(engine);sends++;return {trade_id:1,pair:spec.pair,enter_tag:tag};}};
+ const engine={strategy_version:'demo-rule-exits-v13'},client={snapshot:async()=>({...f.account,engine}),submit:async(p,tag,id,{beforeSend})=>{await beforeSend(engine);sends++;return {trade_id:1,pair:spec.pair,enter_tag:tag};}};
  return {mode,local,snapshot,proposal,policy,client,market,clock,sends:()=>sends,
   getVolumeConfig:async()=>({version:1,enabled:false,startAt:'2026-09-11T00:00:00.000Z'}),
   portfolioEntryFn:async(_opts,run)=>run(async()=>({checked:true})),protectionCheckFn:async()=>({verified:true})};

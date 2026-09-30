@@ -66,7 +66,7 @@ async function freshModelRecheckFixture({mode='demo',atrCost=false}={}){
  assert.notEqual(modelRuleDecision({snapshot,pair,cost,modelEvidence:evidence,now}).action,'hold','snapshot proposal was actually eligible');
  const proposal={...f.proposal,pair,snapshotId:snapshot.id,stakeUsdt:'100',action:mode==='demo'?'buy':'open-long',
   evidenceIds:[(mode==='demo'?'spot:':'futures:')+pair],...(mode==='demo-futures'?{leverage:1}:{})};
- const account={...f.account,engine:{strategy_version:'demo-rule-exits-v12'}},counts={sends:0,protection:0};
+ const account={...f.account,engine:{strategy_version:'demo-rule-exits-v13'}},counts={sends:0,protection:0};
  const client={snapshot:async()=>account,submit:async()=>{counts.sends++;throw Error('TEST_UNEXPECTED_SEND');}};
  const guards={getQuote:async()=>quote,getModelEvidence:async()=>evidence,modelStopped:()=>false,
   portfolioEntryFn:async(_opts,run)=>run(async()=>({checked:true})),
@@ -172,7 +172,7 @@ test('flow bridge persists true proof without model reads and rechecks expiry, S
   f.client.submit=async(p,tag,id,{beforeSend})=>{
    const initial=await readJson(join(local,'entry-plans',tag+'.json'));assert.equal(initial.nativeEntryGuard,undefined);
    if(scenario==='stop'){const {writeFile}=await import('node:fs/promises');await writeFile(join(local,'STOP'),'test');}
-   try{const check=await beforeSend({strategy_version:scenario==='engine'?'old':'demo-rule-exits-v12'});if(scenario==='clock-jump')t.mock.timers.tick(45001);check();}
+   try{const check=await beforeSend({strategy_version:scenario==='engine'?'old':'demo-rule-exits-v13'});if(scenario==='clock-jump')t.mock.timers.tick(45001);check();}
    catch(e){e.submissionStarted=false;throw e;}
    sends++;return {trade_id:1,pair:p.pair,enter_tag:tag};
   };
@@ -194,7 +194,7 @@ test('flow bridge persists true proof without model reads and rechecks expiry, S
 test('per-pair bridge identity persists native proof and rejects duplicate replay',async t=>{
  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-09-14T09:30:05Z')});
  const f=await freshModelRecheckFixture(),local=await mkdtemp(join(tmpdir(),'v12-batch-wire-'));
- f.client.submit=async(p,tag,id,{beforeSend})=>{const check=await beforeSend({strategy_version:'demo-rule-exits-v12'});check();f.counts.sends++;return {trade_id:1,pair:p.pair,enter_tag:tag};};
+ f.client.submit=async(p,tag,id,{beforeSend})=>{const check=await beforeSend({strategy_version:'demo-rule-exits-v13'});check();f.counts.sends++;return {trade_id:1,pair:p.pair,enter_tag:tag};};
  const args={...f,local,...f.guards,getQuote:async()=>f.market,getClock:async()=>f.snapshot.clock,executionPolicyVersion:BATCH_EXECUTION_VERSION};
  const result=await execute(args),id=entryId(f.snapshot.id,f.proposal.pair,BATCH_EXECUTION_VERSION);
  assert.equal(result.tag,'codex-'+id);
@@ -210,7 +210,7 @@ test('minute bridge persists native cadence and reduced risk beyond the first ca
  const f=await freshModelRecheckFixture(),local=await mkdtemp(join(tmpdir(),'adaptive-minute-wire-'));
  Object.assign(f.snapshot,{decisionCadenceVersion:'flow-minute-v1',decisionIntervalMs:60000,decisionBoundary:Date.parse('2026-09-14T09:32:00Z')});
  f.client.submit=async(p,tag,id,{beforeSend})=>{
-  const check=await beforeSend({strategy_version:'demo-rule-exits-v12'});check();f.counts.sends++;
+  const check=await beforeSend({strategy_version:'demo-rule-exits-v13'});check();f.counts.sends++;
   return {trade_id:1,pair:p.pair,enter_tag:tag};
  };
  const args={...f,local,...f.guards,getQuote:async()=>f.market,getClock:async()=>f.snapshot.clock,executionPolicyVersion:BATCH_EXECUTION_VERSION};
@@ -234,7 +234,7 @@ async function minuteReceiptFixture(local,scenario){
  const f=await freshModelRecheckFixture();
  Object.assign(f.snapshot,{decisionCadenceVersion:'flow-minute-v1',decisionIntervalMs:60000,decisionBoundary:Math.floor(Date.now()/60000)*60000});
  f.client.submit=async(p,tag,id,{beforeSend})=>{
-  const check=await beforeSend({strategy_version:'demo-rule-exits-v12'});check();f.counts.sends++;
+  const check=await beforeSend({strategy_version:'demo-rule-exits-v13'});check();f.counts.sends++;
   const raw=await readFile(join(local,'entry-plans',tag+'.json')),plan=JSON.parse(raw);
   if(scenario!=='missing'&&scenario!=='next'){
    const receipt={schemaVersion:1,phase:'callback_before_order',tag,snapshotId:plan.snapshotId,pair:plan.pair,mode:'demo',
@@ -298,7 +298,7 @@ test('flow entry does not consume or edit contrary model forecasts',async t=>{
  const f=await freshModelRecheckFixture(),local=await mkdtemp(join(tmpdir(),'pullback-small-forecast-'));
  const row=f.evidence.prediction.forecasts[0];row.forecastCloses=['103','102','101'];
  const before=structuredClone(row);let plan;
- f.client.submit=async(p,tag,id,{beforeSend})=>{const check=await beforeSend({strategy_version:'demo-rule-exits-v12'});check();plan=await readJson(join(local,'entry-plans',tag+'.json'));f.counts.sends++;return {trade_id:1,pair:p.pair,enter_tag:tag};};
+ f.client.submit=async(p,tag,id,{beforeSend})=>{const check=await beforeSend({strategy_version:'demo-rule-exits-v13'});check();plan=await readJson(join(local,'entry-plans',tag+'.json'));f.counts.sends++;return {trade_id:1,pair:p.pair,enter_tag:tag};};
  const result=await execute({...f,local,...f.guards,getQuote:async()=>f.market,getClock:async()=>f.snapshot.clock});
  assert.equal(result.status,'submitted');assert.equal(f.counts.sends,1);assert.deepEqual(row,before);
  assert.equal(plan.entryPolicyVersion,'order-flow-only-v1');assert.equal(plan.entryConfirmation.priceConfirmation,undefined);

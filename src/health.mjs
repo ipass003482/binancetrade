@@ -114,6 +114,7 @@ export async function healthStatus(local,client,policy,{now=Date.now(),state=pid
  if(!engine.available)problems.push('ENGINE_UNAVAILABLE');
  if(locks.some(l=>l.owner!=='alive'||l.child==='dead'))problems.push('STALE_OR_UNVERIFIED_LOCK');
  if(stored.lastError||stored.stage==='failed')problems.push(stored.lastError??'CYCLE_FAILED');
+ if(stored.observationWait)problems.push(stored.observationWait.reason??'OBSERVATION_UNAVAILABLE');
  if(watch&&!heartbeatFresh&&!watchStartupGrace)problems.push('WATCH_HEARTBEAT_STALE');
  if(continuousRequested&&!stopped){
   if(!watchRunning&&!watchStartupGrace)problems.push('CONTINUOUS_WATCH_NOT_RUNNING');
@@ -122,13 +123,15 @@ export async function healthStatus(local,client,policy,{now=Date.now(),state=pid
  let allowance=null;
  try{allowance=dailyEntryAllowance(await journalRead(join(local,'orders.jsonl')),policy,now);}
  catch(error){problems.push(safeError(error));}
- const entryState=stopped?'paused':!engine.available?'engine_unavailable':problems.length?'fault':
+ const waitingForData=stored.observationWait&&!stored.lastError&&stored.stage!=='failed'&&!problems.some(code=>
+  code!==(stored.observationWait.reason??'OBSERVATION_UNAVAILABLE')&&code!=='CYCLE_STALE');
+ const entryState=stopped?'paused':!engine.available?'engine_unavailable':waitingForData?'waiting_data':problems.length?'fault':
   stored.entryWait?'waiting_risk':continuousRequested&&(!watchRunning&&watchStartupGrace||!freshCycle&&cycleStartupGrace)?'starting':
   stored.lastDecisionStatus==='hold'||stored.lastDecisionStatus==='filtered'?'waiting_signal':
   watchRunning?'running':'manual';
  return {mode:policy.mode,observedAt:new Date(now).toISOString(),healthy:problems.length===0,stopped,
   problems:[...new Set(problems)],engine,engineAvailable:engine.available,watchRunning,freshCycle,
-  entryState,entryWait:stored.entryWait??null,dailyEntryAllowance:allowance,
+  entryState,entryWait:stored.entryWait??null,observationWait:stored.observationWait??null,dailyEntryAllowance:allowance,
   continuous:{requested:continuousRequested,updatedAt:continuous?.updatedAt??null,
    watchStartupGrace,cycleStartupGrace},
   freshness:{heartbeatAgeMs:Number.isFinite(age)?age:null,cycleAgeMs:Number.isFinite(cycleAge)?cycleAge:null,

@@ -84,6 +84,23 @@ test('failure remains visible when watch advances stage to waiting_candle',async
  const h=await f.read();assert.equal(h.healthy,false);assert.ok(h.problems.includes('UNRESOLVED_SUBMISSION'));
 });
 
+test('transient observation wait remains visibly unhealthy after the watch advances, without hiding another fault',async()=>{
+ const f=await setup();await active(f.local);
+ const observationWait={status:'waiting',waitType:'observation',reason:'CLOCK_RTT_REJECTED',
+  sourceStage:'market',entriesAllowed:false,retry:'collect_fresh_next_cycle'};
+ await writeJson(join(f.local,'health.json'),{stage:'waiting_decision',lastCycleCompletedAt:iso(700000),observationWait});
+ let h=await f.read();
+ assert.equal(h.healthy,false);assert.equal(h.entryState,'waiting_data');assert.equal(h.freshCycle,false);
+ assert.ok(h.problems.includes('CLOCK_RTT_REJECTED'));assert.ok(h.problems.includes('CYCLE_STALE'));
+ assert.deepEqual(h.observationWait,observationWait);
+ await writeJson(join(f.local,'health.json'),{stage:'waiting_decision',lastCycleCompletedAt:iso(1000),
+  observationWait,lastError:'UNRESOLVED_SUBMISSION'});
+ h=await f.read();assert.equal(h.entryState,'fault');assert.ok(h.problems.includes('UNRESOLVED_SUBMISSION'));
+ await writeJson(join(f.local,'health.json'),{stage:'waiting_decision',lastCycleCompletedAt:iso(1000),
+  observationWait,lastError:'CLOCK_RTT_REJECTED'});
+ h=await f.read();assert.equal(h.entryState,'fault');
+});
+
 test('forward and equity locks are inspected and require strictly proven dead recovery',async()=>{
  const f=await setup();
  for(const name of ['forward','equity'])await writeJson(join(f.local,name+'.lock'),{pid:123});

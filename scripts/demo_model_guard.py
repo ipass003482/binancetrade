@@ -20,6 +20,7 @@ from urllib.parse import urlsplit, parse_qsl
 
 from ccxt import PermissionDenied
 from demo_order_flow import validate_flow, derive_adaptive_parameters
+from kev_entry_signal import assess_kev_entry_signal, valid_kev_entry_signal_policy
 
 from demo_flow_exit import QUALITY_VERSION, POLICY as FLOW_EXIT_POLICY, strength as flow_strength
 
@@ -31,7 +32,16 @@ _MINUTE_VERSIONS = (VERSION, MINUTE_LEGACY_VERSION)
 _CADENCE_KEYS = {'decisionCadenceVersion', 'decisionIntervalMs', 'decisionBoundary'}
 RULE_VERSION = 'kronos-direction-v12'
 KEV_RULE_VERSION = 'kev-order-flow-v1'
-KEV_GUARD_VERSION = 'kev-native-entry-v1'
+KEV_GUARD_VERSION = 'kev-native-entry-v3'
+KEV_LEGACY_GUARD_VERSION = 'kev-native-entry-v2'
+_KEV_GUARD_VERSIONS = (KEV_GUARD_VERSION, KEV_LEGACY_GUARD_VERSION)
+KEV_DECISION_PROVIDERS = ('codex-cli', 'typesafe-api')
+JEV_REVIEW_VERSION = 'jev-typesafe-entry-v1'
+JEV_MODEL = 'jev-1.13.0'
+_PROVIDER_UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}')
+KEV_NET_HARVEST_POLICY = dict(version='kev-net-harvest-v1', middleAfterSeconds=300,
+    middleNetUsdt='1', lateAfterSeconds=600, lateNetBps='10',
+    notionalBasis='filled_amount_times_open_rate', keepFixedGrossTarget=True, maxHoldingSeconds=900, exitSlippageBps='5')
 PROBE_VERSION = 'demo-execution-probe-v1'
 RISK_POLICY_VERSION = 'native-stop-risk-v1'
 _pending = ContextVar('demo_model_pending_entry', default=None)
@@ -58,6 +68,19 @@ def monotonic_ms():
 
 def reject(code):
     raise PermissionDenied('DEMO_NATIVE_MODEL_' + code)
+
+
+def kev_exit_policy(plan):
+    """Exact prospective policy; absence preserves every original exit plan."""
+    if 'exitPolicy' not in plan:
+        return None
+    policy = plan['exitPolicy']
+    if (plan.get('ruleVersion') != KEV_RULE_VERSION or plan.get('entryPolicyVersion') != KEV_RULE_VERSION
+            or not isinstance(policy, dict) or set(policy) != set(KEV_NET_HARVEST_POLICY)
+            or any(type(policy[key]) is not type(value) or policy[key] != value
+                   for key, value in KEV_NET_HARVEST_POLICY.items())):
+        raise ValueError('KEV_EXIT_POLICY_INVALID')
+    return policy
 
 
 def decimal(value, positive=False, *, signed=False):
@@ -300,6 +323,9 @@ def _kev_costs(plan, guard, mode, pair, side, snapshot, market, reviewed_state, 
             or not 0 <= decimal(config['slippageBpsPerSide']) <= 100
             or not 30 <= decimal(config['priceSpaceBufferBps']) <= 1000):
         reject('KEV_COST_CONFIG')
+    if ('exitPolicy' in plan
+            and decimal(plan['exitPolicy']['exitSlippageBps']) != decimal(config['slippageBpsPerSide'])):
+        reject('KEV_EXIT_SLIPPAGE_CONFIG')
     source = 'https://demo-api.binance.com' if mode == 'demo' else 'https://demo-fapi.binance.com'
     method = 'standard_plus_tax_plus_special_no_bnb_discount' if mode == 'demo' else 'symbol_taker_rate'
     facts = snapshot.get('costFacts')
@@ -406,6 +432,69 @@ def _kev_costs(plan, guard, mode, pair, side, snapshot, market, reviewed_state, 
     return dict(referencePrice=anchor, maxMoveBps=cap)
 
 
+def _same_json(left, right):
+    """JSON structural equality without Python's True == 1 coercion."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        return (type(left) is int or math.isfinite(left)) and (type(right) is int or math.isfinite(right)) and left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(_same_json(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _review_provider(review, receipt, request, response, guard):
+    """Check original provider identity, never a renamed/normalized Kev alias."""
+    jev = review.get('version') == JEV_REVIEW_VERSION
+    provider = 'typesafe-api' if jev else 'codex-cli'
+    state, backend = request.get('state'), response.get('backend')
+    if not isinstance(state, dict) or not isinstance(backend, dict) or not isinstance(receipt, dict):
+        reject('KEV_PROVIDER_IDENTITY')
+    selected = (jev or 'provider' in review or 'providerRevision' in review
+                or 'providerRevision' in receipt or 'decisionProvider' in state)
+    if selected:
+        revision = review.get('providerRevision')
+        model = JEV_MODEL if jev else 'gpt-6-luna'
+        if (not isinstance(revision, str) or not _PROVIDER_UUID.fullmatch(revision)
+                or review.get('provider') != provider or review.get('actualModel') != model
+                or receipt.get('providerRevision') != revision
+                or state.get('decisionProvider') != dict(provider=provider, model=model, revision=revision)):
+            reject('KEV_PROVIDER_IDENTITY')
+    else:
+        revision = None
+    expected_model = JEV_MODEL if jev else 'kev-codex'
+    if (request.get('model') != expected_model or response.get('model') != expected_model
+            or backend.get('name') != provider or backend.get('actual_model') != review.get('actualModel')
+            or backend.get('weights_loaded') is not False or backend.get('probabilities_calibrated') is not False):
+        reject('KEV_PROVIDER_IDENTITY')
+    if jev:
+        expected_backend = dict(name=provider, actual_model=JEV_MODEL, weights_loaded=False,
+            probabilities_calibrated=False, api_calls=1, request_id_source='host', timestamp_source='host')
+        upstream, usage = response.get('upstream'), response.get('usage')
+        if (guard['version'] != KEV_GUARD_VERSION or review.get('decisionMode') != 'autonomous'
+                or state.get('requestVersion') != 'kev-flow-request-v5'
+                or set(backend) != set(expected_backend) or backend != expected_backend
+                or type(backend.get('api_calls')) is not int
+                or not isinstance(response.get('request_id'), str) or not _PROVIDER_UUID.fullmatch(response['request_id'])
+                or not isinstance(upstream, dict) or upstream.get('model') != JEV_MODEL
+                or not _same_json(upstream.get('answers'), response.get('answers')) or not _same_json(upstream.get('usage'), usage)
+                or not isinstance(usage, dict) or type(usage.get('input_tokens')) is not int or not 1 <= usage['input_tokens'] <= 2**53-1
+                or type(usage.get('output_tokens')) is not int or not 0 <= usage['output_tokens'] <= 2**53-1):
+            reject('JEV_UPSTREAM_IDENTITY')
+        answer = upstream.get('answers', {}).get('entry') if isinstance(upstream.get('answers'), dict) else None
+        confidence = answer.get('confidence') if isinstance(answer, dict) else None
+        if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            reject('JEV_UPSTREAM_IDENTITY')
+        created = timestamp(response.get('created_at'))
+        if not timestamp(review.get('startedAt')) <= created <= timestamp(review.get('completedAt')):
+            reject('JEV_RESPONSE_TIME')
+    elif type(backend.get('cli_calls')) is not int or backend['cli_calls'] != 1:
+        reject('KEV_REVIEW_IDENTITY')
+    return provider, revision
+
+
 def _kev_review(plan, guard, mode, pair, side):
     """Bind the exact persisted host decision and source data, without model I/O."""
     folder = ROOT / 'local' / mode / 'runs'
@@ -415,7 +504,7 @@ def _kev_review(plan, guard, mode, pair, side):
     receipt = plan['entryEvidence'].get('kevReview')
     action = 'buy' if mode == 'demo' else 'open-short' if side == 'short' else 'open-long'
     decisions, request, response = review.get('decisions'), review.get('request'), review.get('response')
-    if (review.get('version') != 'kev-codex-entry-v1' or review.get('enabled') is not True
+    if (review.get('version') not in ('kev-codex-entry-v1', JEV_REVIEW_VERSION) or review.get('enabled') is not True
             or review.get('status') != 'reviewed' or review.get('decisionMode') != 'autonomous'
             or review.get('invoked') is not True or review.get('requestAttempted') is not True
             or review.get('mode') != mode or review.get('snapshotId') != guard['snapshotId']
@@ -432,13 +521,9 @@ def _kev_review(plan, guard, mode, pair, side):
     if len(approved) != 1 or (approved[0].get('pair'), approved[0].get('action'), approved[0].get('choice')) != (pair, action, 'select'):
         reject('KEV_SELECTION')
     state, backend = request.get('state'), response.get('backend')
-    if (request.get('model') != 'kev-codex' or response.get('model') != 'kev-codex'
-            or not isinstance(state, dict) or state.get('mode') != mode
+    provider, provider_revision = _review_provider(review, receipt, request, response, guard)
+    if (not isinstance(state, dict) or state.get('mode') != mode
             or state.get('snapshotId') != guard['snapshotId'] or state.get('decisionMode') != 'autonomous'
-            or not isinstance(backend, dict) or backend.get('name') != 'codex-cli'
-            or backend.get('actual_model') != review['actualModel']
-            or backend.get('weights_loaded') is not False or backend.get('probabilities_calibrated') is not False
-            or type(backend.get('cli_calls')) is not int or backend['cli_calls'] != 1
             or response.get('request_id') != review['requestId']):
         reject('KEV_REVIEW_IDENTITY')
     candidates, answers, selection = state.get('candidates'), response.get('answers'), review.get('selection')
@@ -462,10 +547,38 @@ def _kev_review(plan, guard, mode, pair, side):
                              choice='select' if chosen else 'hold', probabilities=probabilities)
                 or chosen and (candidate.get('pair'), candidate.get('action')) != (pair, action)):
             reject('KEV_SELECTION')
-    expected = dict(version=review['version'], decisionMode='autonomous', provider='codex-cli', model=review['actualModel'],
+        if chosen:
+            signal_present = guard['version'] == KEV_GUARD_VERSION
+            if (('entrySignalPolicy' in state) != signal_present
+                    or ('entrySignalPolicyVersion' in candidate) != signal_present
+                    or 'entrySignalPolicy' in candidate
+                    or (signal_present and (not valid_kev_entry_signal_policy(state['entrySignalPolicy'])
+                        or state['entrySignalPolicy'] != plan['entrySignalPolicy']
+                        or candidate['entrySignalPolicyVersion'] != plan['entrySignalPolicy']['version']
+                        or state.get('requestVersion') != 'kev-flow-request-v5'))
+                    or (not signal_present and state.get('requestVersion') == 'kev-flow-request-v5')):
+                reject('KEV_SIGNAL_REVIEW')
+            # An approved pair/side cannot be reused with a different exit
+            # experiment. Presence is part of identity: absent is not null.
+            present = 'exitPolicy' in plan
+            if (('exitPolicy' in state) != present or ('exitPolicyVersion' in candidate) != present
+                    or 'exitPolicy' in candidate
+                    or state.get('exitPolicy') != plan.get('exitPolicy')
+                    or (present and (state.get('requestVersion') != ('kev-flow-request-v5' if signal_present else 'kev-flow-request-v4')
+                        or candidate['exitPolicyVersion'] != plan['exitPolicy']['version']))
+                    or (not present and state.get('requestVersion') in ('kev-flow-request-v4', 'kev-flow-request-v5'))):
+                reject('KEV_EXIT_POLICY_REVIEW')
+            if present:
+                try:
+                    kev_exit_policy(dict(plan, exitPolicy=state['exitPolicy']))
+                except ValueError:
+                    reject('KEV_EXIT_POLICY_REVIEW')
+    expected = dict(version=review['version'], decisionMode='autonomous', provider=provider, model=review['actualModel'],
         requestId=review['requestId'], snapshotId=review['snapshotId'], snapshotSha256=review['snapshotSha256'],
         configSha256=review['configSha256'], proofSha256=review['proofSha256'], completedAt=review.get('completedAt'), expiresAt=review.get('expiresAt'),
         decision=approved[0], selection=selection, probabilitiesCalibrated=False)
+    if provider_revision is not None:
+        expected['providerRevision'] = provider_revision
     if receipt != expected:
         reject('KEV_RECEIPT_IDENTITY')
     started, completed, expires = [timestamp(review.get(k)) for k in ('startedAt', 'completedAt', 'expiresAt')]
@@ -473,6 +586,19 @@ def _kev_review(plan, guard, mode, pair, side):
             or expires != guard['entryDeadline'] or expires > completed + 60000):
         reject('KEV_REVIEW_TIME')
     snapshot, _ = _read_kev_json(folder / (guard['snapshotId'] + '.snapshot.json'), 8 * 1024 * 1024)
+    selected_provider = snapshot.get('kevEntry')
+    snapshot_declared = isinstance(selected_provider, dict) and any(k in selected_provider for k in ('provider', 'providerRevision'))
+    if ((provider_revision is not None) != snapshot_declared
+            or (provider_revision is not None and (selected_provider.get('enabled') is not True
+                or selected_provider.get('version') != review['version']
+                or selected_provider.get('provider') != provider or selected_provider.get('model') != review['actualModel']
+                or selected_provider.get('providerRevision') != provider_revision))):
+        reject('KEV_PROVIDER_SNAPSHOT')
+    signal_present = guard['version'] == KEV_GUARD_VERSION
+    if (('entrySignalPolicy' in snapshot) != signal_present
+            or (signal_present and (not valid_kev_entry_signal_policy(snapshot['entrySignalPolicy'])
+                or snapshot['entrySignalPolicy'] != plan['entrySignalPolicy']))):
+        reject('KEV_SIGNAL_SNAPSHOT')
     markets = snapshot.get('markets')
     if (snapshot.get('id') != guard['snapshotId'] or snapshot.get('mode') != mode
             or snapshot.get('timeframe') != 'order-flow'
@@ -487,12 +613,16 @@ def _kev_review(plan, guard, mode, pair, side):
 
 
 def _kev_guard(plan, mode, pair, side):
+    try:
+        kev_exit_policy(plan)
+    except ValueError:
+        reject('KEV_EXIT_POLICY')
     g, c, evidence = plan.get('nativeEntryGuard'), plan.get('entryConfirmation'), plan.get('entryEvidence')
     keys = {'version', 'snapshotId', 'mode', 'pair', 'side', 'decisionCadenceVersion', 'decisionIntervalMs',
             'decisionBoundary', 'entryDeadline', 'requiredPriceSpaceBps', 'bridgeQuotePrice', 'quoteFetchedAt',
             'maxPriceMoveBps', 'leverage', 'clock', 'kevReviewSha256'}
     forbidden = {'candleBoundary', 'atrTimeframe', 'model', 'adaptiveParameters', 'atr15', 'targetAtr', 'forecastCloses', 'modelDeadline'}
-    if (not isinstance(g, dict) or set(g) != keys or g.get('version') != KEV_GUARD_VERSION
+    if (not isinstance(g, dict) or set(g) != keys or g.get('version') not in _KEV_GUARD_VERSIONS
             or (g.get('mode'), g.get('pair'), g.get('side')) != (mode, pair, side)
             or plan.get('ruleVersion') != KEV_RULE_VERSION or plan.get('entryPolicyVersion') != KEV_RULE_VERSION
             or plan.get('entrySignalEngine') != 'kev_order_flow' or plan.get('purpose') != 'strategy'
@@ -515,6 +645,10 @@ def _kev_guard(plan, mode, pair, side):
             or type(plan.get('maxHoldingBars')) is not int or plan['maxHoldingBars'] != 0
             or plan.get('profitProtection') != dict(version='net-profit-trail-v1', triggerNetUsdt=.5, givebackNetUsdt=.25, riskMultiple=.5)):
         reject('KEV_GUARD_IDENTITY')
+    signal_present = g['version'] == KEV_GUARD_VERSION
+    if (('entrySignalPolicy' in plan) != signal_present
+            or (signal_present and not valid_kev_entry_signal_policy(plan['entrySignalPolicy']))):
+        reject('KEV_SIGNAL_POLICY')
     raw = json.dumps(c['orderFlow'], separators=(',', ':'), ensure_ascii=False, allow_nan=False)
     if sha256(raw.encode()).hexdigest() != evidence['proofSha256']:
         reject('FLOW_PROOF_HASH')
@@ -538,10 +672,16 @@ def _validate_kev(permit, now):
     plan, mode = permit['plan'], permit['mode']
     _validate_risk(permit)
     g = _kev_guard(plan, mode, permit['pair'], permit['side'])
-    try:
-        validate_flow(plan['entryConfirmation']['orderFlow'], mode, permit['pair'], permit['side'], now, data_only=True)
-    except Exception:
-        reject('FLOW_EVIDENCE')
+    if g['version'] == KEV_GUARD_VERSION:
+        signal = assess_kev_entry_signal(plan['entryConfirmation']['orderFlow'], mode,
+                                         permit['pair'], permit['side'] == 'long', now)
+        if signal['status'] != 'ok' or signal['eligible'] is not True:
+            reject(signal['reason'])
+    else:
+        try:
+            validate_flow(plan['entryConfirmation']['orderFlow'], mode, permit['pair'], permit['side'], now, data_only=True)
+        except Exception:
+            reject('FLOW_EVIDENCE')
     lower, upper = clock_range(g['clock'], mode, now)
     boundary, deadline = g['decisionBoundary'], g['entryDeadline']
     if lower < boundary or upper >= deadline:
@@ -566,6 +706,12 @@ def _validate_kev(permit, now):
         anchor, cap = g['_decisionQuote']['referencePrice'], g['_decisionQuote']['maxMoveBps']
         if abs(decimal(permit['rate'], True) - anchor) * 10000 > anchor * cap:
             reject('KEV_DECISION_QUOTE_MOVED')
+        if g['version'] == KEV_GUARD_VERSION:
+            long = permit['side'] == 'long'
+            origin = decimal(plan['entryConfirmation']['orderFlow']['books'][0]['asks' if long else 'bids'][0][0], True)
+            rate = decimal(permit['rate'], True)
+            if not (rate > origin if long else rate < origin):
+                reject('KEV_SIGNAL_PRICE_NOT_CONTINUED')
 
 
 def _flow_guard(plan, mode, pair, side):
@@ -784,7 +930,7 @@ def _validate(permit, now, mono):
     if not 0 <= now - timestamp(plan['createdAt']) <= 120000:
         reject('PLAN_EXPIRED')
     if (plan.get('ruleVersion') == KEV_RULE_VERSION or plan.get('entryPolicyVersion') == KEV_RULE_VERSION
-            or plan.get('nativeEntryGuard', {}).get('version') == KEV_GUARD_VERSION):
+            or plan.get('nativeEntryGuard', {}).get('version') in _KEV_GUARD_VERSIONS):
         _validate_kev(permit, now)
         return
     if not model:
@@ -859,7 +1005,7 @@ def record_callback_rejection(plan, mode, pair, tag, reason):
         native = plan.get('nativeEntryGuard')
         if (not isinstance(native, dict) or native.get('mode') != mode
                 or native.get('pair') != pair or native.get('snapshotId') != plan['snapshotId']
-                or native.get('version') not in (*_MINUTE_VERSIONS, LEGACY_VERSION, KEV_GUARD_VERSION)):
+                or native.get('version') not in (*_MINUTE_VERSIONS, LEGACY_VERSION, *_KEV_GUARD_VERSIONS)):
             return False
         boundary = plan.get('decisionBoundary', native.get('candleBoundary'))
         if type(boundary) is not int or boundary <= 0:

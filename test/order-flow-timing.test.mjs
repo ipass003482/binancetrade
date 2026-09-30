@@ -45,6 +45,32 @@ test('a slow tape cannot relabel an older depth response with its completion tim
  assert.equal(r.markets['ETH/USDT'].version,FLOW_VERSION);
 });
 
+test('collector separates valid Futures data from long and short entry diagnostics',async()=>{
+ const pair='ETH/USDT:USDT';
+ const sellBook=(at,mid)=>{const value=book(at,mid);
+  for(const row of value.bids)row[1]='1';
+  for(const row of value.asks)row[1]='3';
+  return value;
+ };
+ const previous={mode:'demo-futures',markets:{[pair]:{books:[sellBook(B-20000,100.002),sellBook(B-10000,100.001)]}}};
+ const fetchImpl=async raw=>{
+  const u=new URL(raw);
+  if(u.pathname.endsWith('/time'))return response({serverTime:B});
+  if(u.pathname.endsWith('/depth'))return response({lastUpdateId:2,bids:sellBook(B,100).bids,asks:sellBook(B,100).asks});
+  const end=Number(u.searchParams.get('endTime'));
+  return response([0,1,2].map(i=>({a:i+1,T:end-50000+i*24000,p:'100',q:'1',m:true})));
+ };
+ const result=await sampleOrderFlow({mode:'demo-futures',pairs:[pair]},previous,{fetchImpl,now:()=>B});
+ const diagnostic=result.diagnostics[pair];
+ assert.equal(diagnostic.dataValidity.eligible,true);
+ assert.equal(diagnostic.directionDiagnostics.long.eligible,false);
+ assert.equal(diagnostic.directionDiagnostics.long.reason,'FLOW_REQUESTED_DIRECTION_UNSUPPORTED');
+ assert.equal(diagnostic.directionDiagnostics.short.eligible,true);
+ // Existing top-level readers still see the original long-side diagnostic.
+ assert.equal(diagnostic.eligible,diagnostic.directionDiagnostics.long.eligible);
+ assert.equal(diagnostic.reason,diagnostic.directionDiagnostics.long.reason);
+});
+
 test('fixed cadence retains five-second recovery floor and full rate-limit backoff',()=>{
  assert.equal(nextFlowSampleDelay(1200),8800);
  assert.equal(nextFlowSampleDelay(9000),5000);
@@ -78,7 +104,7 @@ test('a round cannot dispatch with a rolled-back or expired exchange-clock ancho
 
 // Run the real collector and its publication boundary with synthetic exchange
 // responses, an explicit clock, no filesystem and no live timers or network.
-async function recoveryHarness(){
+async function recoveryHarness({observeOverride,archive=null}={}){
  let at=B,fault=null,next=null,ready=null,clockReads=0;
  const published=[],observed=[],delays=[];
  const fetchImpl=async raw=>{
@@ -93,6 +119,7 @@ async function recoveryHarness(){
    const mid=100+(at-B)/1000000;
    return response({lastUpdateId:fault==='regressed-id'?0:1+(at-B)/1000,bids:levels(mid,'bids'),asks:levels(mid,'asks')});
   }
+  if(fault==='pair-fetch')throw Error('synthetic pair request failure');
   const end=Number(u.searchParams.get('endTime'));
   return response([0,1,2].map(i=>({a:i+1,T:end-(fault==='stale-tape'?55000:50000)+i*(fault==='stale-tape'?10000:24000),p:'100',q:'1',m:false})));
  };
@@ -101,7 +128,7 @@ async function recoveryHarness(){
   now:()=>at,hasStop:async()=>false,
   sampleRound:(policy,previous)=>sampleOrderFlow(policy,previous,{fetchImpl,now:()=>at}),
   publish:async(_path,sample)=>{published.push(structuredClone(sample));},
-  observe:async sample=>{observed.push(structuredClone(sample));},
+  observe:observeOverride??(async sample=>{observed.push(structuredClone(sample));}),archive,
   schedule:(callback,delay)=>{next=callback;delays.push(delay);if(ready){ready();ready=null;}return 1;},unschedule:()=>{}
  });
  await waitScheduled();
@@ -147,4 +174,45 @@ test('failure classification preserves rate-limit backoff without exposing raw u
   assert.equal(privateFailure.failureReason,'FLOW_FETCH_OR_PUBLISH_FAILED');
   assert.equal(JSON.stringify(privateFailure).includes('private upstream detail'),false);
  }finally{await h.stop();}
+});
+
+test('a failed pair stays unavailable but recovery reuses only internally retained raw books',async()=>{
+ const h=await recoveryHarness();
+ try{
+  await h.tick(10000);const before=await h.tick(20000);
+  assert.equal(before.diagnostics['ETH/USDT'].eligible,true);
+  const failed=await h.tick(30000,'pair-fetch');
+  assert.deepEqual(failed.markets,{});assert.equal(failed.diagnostics['ETH/USDT'].reason,'FLOW_FETCH_FAILED');
+  assert.deepEqual(h.observed.at(-1).markets,{});
+  const recovered=await h.tick(40000);
+  assert.deepEqual(recovered.markets['ETH/USDT'].books.map(b=>b.at),[B+10000,B+20000,B+40000]);
+  assert.equal(recovered.markets['ETH/USDT'].endTime,B+40000-1500);
+  assert.equal(recovered.diagnostics['ETH/USDT'].eligible,true);
+ }finally{await h.stop();}
+});
+
+test('per-pair recovery cannot reuse an expired, gapped, regressed or stale sample',async()=>{
+ for(const [offset,fault,reason] of [[41000,null,'FLOW_BOOK_GAP'],[90000,null,'FLOW_INCOMPLETE'],
+  [40000,'regressed-id','FLOW_BOOK_GAP'],[40000,'stale-tape','FLOW_TAPE_STALE']]){
+  const h=await recoveryHarness();
+  try{
+   await h.tick(10000);await h.tick(20000);await h.tick(30000,'pair-fetch');
+   const recovered=await h.tick(offset,fault);
+   assert.equal(recovered.diagnostics['ETH/USDT'].eligible,false);
+   assert.equal(recovered.diagnostics['ETH/USDT'].reason,reason);
+  }finally{await h.stop();}
+ }
+});
+
+test('quote archive continues independently while existing Spot observer is busy',async()=>{
+ let release;const observed=[],archived=[];
+ const h=await recoveryHarness({observeOverride:async sample=>{observed.push(sample);await new Promise(resolve=>{release=resolve;});},
+  archive:sample=>{archived.push(sample);}});
+ try{
+  await h.tick(10000);await h.tick(20000);
+  assert.equal(observed.length,1);assert.equal(archived.length,3);
+  assert.equal(archived.at(-1).diagnostics['ETH/USDT'].eligible,true);
+  assert.deepEqual(archived.at(-1).clock,{mode:'demo',source:'https://demo-api.binance.com/api/v3/time',
+   requestStartedAt:B+20000,receivedAt:B+20000,serverTime:B+20000});
+ }finally{release();await h.stop();}
 });

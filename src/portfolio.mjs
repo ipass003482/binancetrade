@@ -9,7 +9,7 @@ const Decimal=DecimalBase.clone({precision:64});
 const MODES=['demo','demo-futures'];
 export const PORTFOLIO_SOURCE='freqtrade-demo-portfolio';
 export const PORTFOLIO_DEFAULTS=Object.freeze({version:1,capitalUsdt:'2000',maxGrossExposureUsdt:'400',
- maxOpenRiskUsdt:'10',maxDailyLossUsdt:'50',maxDrawdownUsdt:'100',maxSnapshotAgeSeconds:15,blockOppositeSameBase:true});
+ maxOpenRiskUsdt:'10',maxDailyLossUsdt:'50',maxDrawdownUsdt:'500',maxSnapshotAgeSeconds:15,blockOppositeSameBase:true});
 const fail=code=>{throw new Error(code);};
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const timestamp=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
@@ -24,7 +24,7 @@ const number=(value,code)=>decimal(value)??fail(code);
 const sum=values=>values.reduce((a,b)=>a.plus(b),new Decimal(0));
 const fresh=(value,now,seconds)=>timestamp(value)&&now-Date.parse(value)>=0&&now-Date.parse(value)<=seconds*1000;
 
-/** Hard upper bounds preserve the authorized Demo envelope. Lower settings are allowed. */
+/** Hard upper bounds preserve the authorized Demo envelope (drawdown raised to $500 on 2026-09-30). Lower settings are allowed. */
 export function validatePortfolioConfig(config){
  if(!object(config)||Object.keys(config).some(name=>!Object.hasOwn(PORTFOLIO_DEFAULTS,name))||config.version!==1||
   config.blockOppositeSameBase!==true||!Number.isInteger(config.maxSnapshotAgeSeconds)||

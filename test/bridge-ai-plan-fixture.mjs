@@ -37,7 +37,7 @@ export async function buildAiBridgePlan({mode='demo',short=false,kev}={}){
  const proposal={snapshotId:snapshot.id,pair,action:mode==='demo'?'buy':short?'open-short':'open-long',
   stakeUsdt:'25',evidenceIds:[(mode==='demo'?'spot:':'futures:')+pair],reason:'Offline AI bridge contract test',
   ...(mode==='demo-futures'?{leverage:1}:{})};
- const engine={strategy_version:'demo-rule-exits-v12'};
+ const engine={strategy_version:'demo-rule-exits-v13'};
  const account={engine,trades:[],balance:{stake:'USDT',currencies:[{currency:'USDT',free:1000}]},
   daily:{stake_currency:'USDT',data:[{date:iso.slice(0,10),abs_profit:0}]}};
  const local=await mkdtemp(join(tmpdir(),'binancetrade-ai-bridge-'));

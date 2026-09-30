@@ -1,26 +1,28 @@
 # Binance trade
 
 獨立的 Windows 原生 Binance 現貨與 USDT 永續合約研究、模擬交易專案。
-Demo 目前以固定突破規則產生決策；dry-run 保留 Codex CLI 分析。程式風控決定能否送單；Freqtrade 管理訂單、持倉與退出。
+Demo 使用訂單流候選訊號與可切換的 JEV／Kev 審核器；dry-run 保留 Codex CLI 分析。程式風控決定能否送單；Freqtrade 管理訂單、持倉與退出。
 不使用 Docker，不連接 OpenAlice／UTA，不支援真實資金交易。
 
-## 目前的 Demo 策略
+## 目前的 Demo 策略（2026-09-30）
 
-`config/decision.json` 已選用 Demo 實驗版 `buffered-breakout-atr-v3`。單根 5 分鐘已收盤 K 線突破／跌破前 20 根高低點，另需超過 0.1 ATR 緩衝；配合 1h／4h 方向、均線、量能與成本檢查。現貨買入／賣出持有資產，合約可做多或做空，目前限 1 倍逐倉。每個方向的排除原因與門檻分別存於 `rules.json` 的 `directionChecks`。
+Demo 進場路徑為 `kev-order-flow-v1`，使用 `kev-coherent-flow-v1` 的共同時間窗成交壓力與買賣報價變化。現貨只做多；合約可做多或做空，目前限 1 倍逐倉。主程式先檢查資料、成本、倉位與風險，再讓審核器選擇候選或 HOLD；送單前仍須通過原始批准、報價時效及原生保護檢查。
 
-Demo 每 5 分鐘收盤後約 5 秒啟動一輪，每輪取 96 根已收盤 K 線。1／4 小時方向分別以 12／48 根位移計算；訊號最長有效 120 秒，下一根收盤即失效。本機 dry-run 與無週期標記的舊歷史檔維持 15m。
+`src/cli.mjs watch` 在現貨與合約各自每 60 秒評估新鮮訂單流。同帳戶／模式只應有一個 watcher。舊 K 線策略與研究模組仍供歷史分析及獨立實驗使用，不代表目前 Demo 的進場路徑。
 
-每筆新版進場會保存數值退出計畫：依成交價套用 1 ATR 比例停損（上限 2%）、2 ATR 目標、最長 4 小時。既有 ROI 與現貨追蹤停利仍可能較早退出。引擎必須回報 `demo-rule-exits-v3` 且 timeframe 為 `5m` 才可新增規則倉位，舊 v1／v2 持倉仍沿用其既有數值退出計畫。策略尚未證明獲利，僅供 Demo 測試。
+JEV 使用官方 TypeSafe API 的 `jev-1.13.0`，提示詞版本為 `jev-host-ranked-choice-v2`：先考慮主程式排名第一的 q0，前面的候選存在具體阻擋原因時才考慮後面的候選。所有候選都受阻時才 HOLD；沒有省略原有風控，也不保證成交或提高勝率。詳見 [核心進場規則](docs/kev-core-entry-2026-09-29.md)、[JEV 提示詞 v2](docs/jev-astra-prompt-v2-2026-09-30.md) 與 [成本及退出證據](docs/jev-performance-2026-09-30.md)。
 
-另有獨立的 `ai-high-frequency-shadow-v1` 影子觀測器：每分鐘讀取公開訂單簿、主動成交與已收盤 1 分鐘 K 線，每 5 個週期才更新一次受限 AI 策略設定，並在 60 秒後記錄扣除研究成本情境的 markout。它固定是 `dry-run`、`tradeEnabled:false`，不會改變 Demo 下單規則或送出訂單。執行 `npm run ai:high-frequency-shadow -- --cycles 10 --interval-seconds 60` 可做有限週期觀測；完整限制與輸出見 [影子層紀錄](docs/ai-high-frequency-shadow-2026-09-18.md)。
+新進場保留不可變更的數值退出計畫：0.5% 停損、1.5% 價格目標、最長 900 秒，以及扣費後追蹤／分時收割規則。共享風險設定見 `config/portfolio.json`，最大回撤門檻為 500 USDT。這是停止新增進場的風險額度，與統計目標筆數不同。
 
-實際的高頻交易路徑是 Demo 的 `src/cli.mjs watch`（`live-flow-adaptive-v2`），現貨與合約各自運行，每 60 秒重新評估新鮮訂單流並交給既有成本、帳戶、原生停損與送單防護。現貨只允許做多，合約允許做多與做空；影子層不能取代這條送單路徑，也不能另外啟動第二個同帳戶 watcher，避免重複開倉。
+本輪統計只讀取 `local/trade-goals/active.json` 所指向的目標，核對允許的審核器、原始批准與真正進場成交，依模式和 trade_id 去重。勝負以扣除手續費與資金費率後的淨損益判定；切換審核器不會自動清除交易歷史或重設進度。
 
-費率由 Demo 簽名唯讀接口讀取；缺漏或過期禁止新進場。滑點為設定假設。`watch` 每分鐘記錄全帳戶估值，未對帳外部資金流，因此估值變化不能當作策略淨利。
+## JEV 設定與金鑰
 
-執行 `npm run baseline -- download --mode demo --pair BTC/USDT --days 30` 可產生獨立歷史基準。資料、成本、原始碼及結果保存於 `local/<mode>/baselines/`；它不是完整引擎退出重播，也不是已驗證的樣本外績效。合約基準目前僅接受資金費率事件精確對齊 K 線邊界的資料，遇到不支援的時間戳會停止，不會假設費用為零。
+啟動控制台後，開啟 `http://127.0.0.1:18100/settings`，在本機輸入 TypeSafe API Key，儲存並驗證，再明確選擇 JEV。僅儲存金鑰不會切換審核器；JEV 失敗時不會默默改用 Kev。JEV 是託管 API，不需另裝本機模型伺服器。詳見 [切換與金鑰保護](docs/jev-switch-2026-09-29.md)。
 
-切換紀錄與驗證結果見 [v1 啟用紀錄](docs/rules-demo-activation-2026-09-10.md) 、[v2 進場修改](docs/entry-v2-2026-09-10.md) 與 [5 分鐘 v3 啟用](docs/five-minute-2026-09-10.md)。
+GitHub 僅包含程式、設定範本、文件及測試。本機 `local/`、`work/`、`.env`、金鑰與資料庫均不納入版本控制。JEV 金鑰以 Windows DPAPI 加密保存在 `local/decision-provider/credentials/`；審核器選擇也是本機狀態。新 clone 必須自行提供金鑰並選擇 JEV，不會繼承原電腦的認證、選擇或交易紀錄。部分共用模組保留 `kev-*` 名稱，JEV 仍依賴這些模組。
+
+以下展示截圖及初期使用說明保留歷史背景；其中舊策略參數不代表本節所列的目前 Demo 策略。實際模式設定與啟動要求請以 [現行計畫](plans/current-v12.md) 及程式檢查為準。
 
 ## 介面預覽
 

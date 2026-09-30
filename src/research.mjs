@@ -10,7 +10,8 @@ import { MODES,isFutures } from './mode.mjs';
 import { readExchangeClock } from './exchange-clock.mjs';
 import { clockBoundary,clockDecisionBoundary,FLOW_DECISION_CADENCE_VERSION,FLOW_DECISION_INTERVAL_MS } from './entry-timing.mjs';
 import { timeframeSpec,tradingTimeframe } from './timeframe.mjs';
-import {readOrderFlow} from './order-flow-collector.mjs';
+import {readOrderFlow,readOrderFlowSample} from './order-flow-collector.mjs';
+import {KEV_ENTRY_SIGNAL_POLICY} from './kev-entry-signal.mjs';
 const PUBLIC='https://data-api.binance.vision';
 // Kev entry observations intentionally have no candle or technical-indicator
 // dependency. Native risk and execution still validate the Demo instrument,
@@ -46,14 +47,24 @@ export async function marketOrderFlow(pair,{fetchImpl=fetch,mode='demo',clock,re
   source:base,mode,timeframe:'order-flow',clock,fetchedAt:quoteFetchedAt,quoteAsOf:null,
   note:'Public REST quote has no exchange event timestamp; fetchedAt is retrieval time.'};
 }
-export async function collectOrderFlow(policy,{fetchImpl=fetch,readOrderFlowFn=readOrderFlow}={}) {
+export async function collectOrderFlow(policy,{fetchImpl=fetch,readOrderFlowSampleFn=readOrderFlowSample}={}) {
  if(!['demo','demo-futures'].includes(policy.mode))throw new Error('FLOW_DEMO_ONLY');
  const clock=await readExchangeClock(policy.mode,{fetchImpl}),createdAt=new Date().toISOString();
- const snapshot={id:randomUUID(),entryPolicyVersion:'kev-order-flow-v1',timeframe:'order-flow',createdAt,clock,
+ const snapshot={id:randomUUID(),entryPolicyVersion:'kev-order-flow-v1',entrySignalPolicy:{...KEV_ENTRY_SIGNAL_POLICY},timeframe:'order-flow',createdAt,clock,
   decisionCadenceVersion:FLOW_DECISION_CADENCE_VERSION,decisionIntervalMs:FLOW_DECISION_INTERVAL_MS,
   decisionBoundary:clockDecisionBoundary(clock,policy.mode,Date.parse(createdAt)),mode:policy.mode,
   markets:[],evidence:[],errors:[],researchCoverage:[]};
- snapshot.markets=await Promise.all(policy.pairs.map(pair=>marketOrderFlow(pair,{fetchImpl,mode:policy.mode,clock,readOrderFlowFn})));
+ const markets=await Promise.all(policy.pairs.map(pair=>marketOrderFlow(pair,{fetchImpl,mode:policy.mode,clock,
+  readOrderFlowFn:async()=>null})));
+ // Quote/info requests can straddle a sampler publication. Reading each
+ // proof when those requests start freezes the previous generation for Kev.
+ // Capture one completed generation after all quotes return, then bind its
+ // original bytes/timestamps before candidate evaluation and snapshot hashing.
+ const sample=structuredClone(await readOrderFlowSampleFn(policy.mode));
+ const current=sample?.mode===policy.mode&&sample.version==='sampled-demo-flow-v1'&&!sample.error?sample:null;
+ snapshot.markets=markets.map(m=>({...m,orderFlow:current?.markets?.[m.pair]??null}));
+ snapshot.orderFlowAcquisition={version:'post-quotes-single-generation-v1',acquiredAt:new Date().toISOString(),
+  observedAt:current?.observedAt??null,completedAt:current?.completedAt??null,pid:current?.pid??null};
  snapshot.evidence=snapshot.markets.map(m=>({id:(isFutures(policy.mode)?'futures:':'spot:')+m.pair,
   status:'ok',source:m.source,fetchedAt:m.fetchedAt,data:m})).sort((a,b)=>a.id.localeCompare(b.id));
  snapshot.completedAt=new Date().toISOString();

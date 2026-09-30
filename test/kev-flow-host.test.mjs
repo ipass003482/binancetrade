@@ -7,6 +7,7 @@ import {reviewKevEntries,kevEntryRejection} from '../src/kev-entry.mjs';
 import {runEntryBatch} from '../src/batch-entry.mjs';
 import {kevReply} from './kev-fixtures.mjs';
 import {KEV_CONFIRMATION_VERSION,KEV_CONFIRMATION_INTERVAL_MS} from '../src/kev-confirmation.mjs';
+import {buildKevPortfolioEligibility} from '../src/kev-portfolio.mjs';
 
 const boundary=Date.parse('2026-09-21T06:02:00Z'),now=boundary+20000;
 const config={version:'kev-codex-entry-v1',baseUrl:'http://127.0.0.1:8009',model:'kev-codex',expectedModel:'gpt-6-luna',
@@ -48,6 +49,64 @@ async function approved(f,choice){
  return reviewKevEntries({...f,reference,
   fetchImpl:async(_url,{body})=>new Response(JSON.stringify(kevReply(JSON.parse(body),{choice,now})))});
 }
+
+test('Kev shortlist excludes an opposite portfolio position and can approve another eligible pair',async()=>{
+ const f=fixture(),accounts=Object.fromEntries(['demo','demo-futures'].map(mode=>[mode,{observedAt:new Date(now).toISOString(),
+  engine:{demo_trading:true,dry_run:false,exchange:'binance',trading_mode:mode==='demo'?'spot':'futures',margin_mode:'isolated',state:'running'},
+  trades:mode==='demo'?[]:[{trade_id:129,pair:'BTC/USDT:USDT',is_short:true,is_open:true,has_open_orders:false}]}]));
+ const receipt=buildKevPortfolioEligibility({snapshot:f.snapshot,accounts,now});
+ const reference=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState:priorConfirmationState(f),
+  portfolioEligibility:receipt,portfolioEligibilityRequired:true});
+ assert.equal(reference.candidates[0].action,'hold');
+ assert.ok(reference.candidates[0].reasons.includes('PORTFOLIO_OPPOSITE_POSITION'));
+ assert.equal(reference.candidates[1].action,'buy');assert.equal(reference.metadata.candidateDiagnostics.eligible,1);
+ assert.equal(reference.metadata.candidateDiagnostics.blockers.find(b=>b.reason==='PORTFOLIO_OPPOSITE_POSITION').class,'hard');
+ const review=await reviewKevEntries({...f,reference,fetchImpl:async(_url,{body})=>{
+  const request=JSON.parse(body);assert.deepEqual(request.state.candidates.map(c=>c.pair),['ETH/USDT']);
+  return new Response(JSON.stringify(kevReply(request,{choice:'q0',now})));
+ }});
+ const after=kevFlowReference(f.snapshot,f.policy,f.account,{now:now+18000,review,confirmationState:reference.metadata.confirmationState,
+  portfolioEligibility:receipt,portfolioEligibilityRequired:true});
+ assert.equal(after.proposal.action,'buy');assert.equal(after.proposal.pair,'ETH/USDT');
+ assert.equal(after.metadata.portfolioEligibility.assessedAt,receipt.assessedAt);
+});
+
+test('missing or unavailable required portfolio context cannot invoke Kev for otherwise confirmed signals',async()=>{
+ for(const receipt of [undefined,null]){
+  const f=fixture(),reference=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState:priorConfirmationState(f),
+   portfolioEligibility:receipt,portfolioEligibilityRequired:true});
+  assert.equal(reference.metadata.candidateDiagnostics.eligible,0);
+  const review=await reviewKevEntries({...f,reference,fetchImpl:()=>assert.fail('unknown portfolio must not invoke Kev')});
+  assert.equal(review.status,'not_requested');assert.equal(review.reason,'KEV_NO_ELIGIBLE_ENTRY');
+  assert.ok(reference.candidates.every(c=>c.reasons.includes('KEV_PORTFOLIO_CONTEXT_MISSING')));
+ }
+});
+
+test('the portfolio pass is confirmation-idempotent and postreview flow expiry clears the approved choice',async()=>{
+ const f=fixture();
+ for(const market of f.snapshot.markets){
+  const proof=market.orderFlow;proof.startTime-=20000;proof.endTime-=20000;
+  proof.books.forEach(book=>book.at-=20000);proof.trades.forEach(trade=>trade.T-=20000);
+ }
+ const accounts=Object.fromEntries(['demo','demo-futures'].map(mode=>[mode,{observedAt:new Date(now).toISOString(),trades:[],
+  engine:{demo_trading:true,dry_run:false,exchange:'binance',trading_mode:mode==='demo'?'spot':'futures',margin_mode:'isolated',state:'running'}}]));
+ const receipt=buildKevPortfolioEligibility({snapshot:f.snapshot,accounts,now});
+ const preliminary=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState:priorConfirmationState(f)});
+ const before=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState:preliminary.metadata.confirmationState,
+  portfolioEligibility:receipt,portfolioEligibilityRequired:true});
+ assert.equal(before.metadata.candidateDiagnostics.eligible,2);
+ for(const candidate of before.candidates)assert.equal(candidate.confirmation.count,2);
+ const review=await reviewKevEntries({...f,reference:before,fetchImpl:async(_url,{body})=>
+  new Response(JSON.stringify(kevReply(JSON.parse(body),{choice:'q0',now})))});
+ assert.equal(review.status,'reviewed');
+ const after=kevFlowReference(f.snapshot,f.policy,f.account,{now:now+26000,review,confirmationState:before.metadata.confirmationState,
+  portfolioEligibility:receipt,portfolioEligibilityRequired:true});
+ assert.equal(after.proposal.action,'hold');assert.equal(after.selected,null);
+ assert.equal(after.metadata.candidateDiagnostics.eligible,0);
+ assert.ok(after.candidates.every(candidate=>candidate.reasons.includes('FLOW_STALE')));
+ assert.deepEqual(after.metadata.confirmationState.signals,{});
+ assert.equal(after.metadata.portfolioEligibility.assessedAt,receipt.assessedAt);
+});
 
 test('aligned order-flow data reaches Kev without candles, forecasts or a deterministic long-side signal',()=>{
  const f=fixture(),market=f.snapshot.markets[0];
@@ -105,6 +164,18 @@ test('candidate diagnostics separate native hard blockers from Kev selection vet
  assert.ok(blocked.metadata.candidateDiagnostics.blockers.some(row=>row.reason==='POSITION_OR_EXPOSURE_LIMIT'&&row.class==='hard'));
  assert.match(blocked.proposal.reason,/KEV_NO_ELIGIBLE_ENTRY/);
  assert.match(blocked.proposal.reason,/POSITION_OR_EXPOSURE_LIMIT/);
+});
+
+test('Kev timeout remains a HOLD and its actual reason reaches the final proposal',()=>{
+ const f=fixture(),confirmationState=priorConfirmationState(f);
+ const before=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState});
+ const after=kevFlowReference(f.snapshot,f.policy,f.account,{now,confirmationState,
+  review:{status:'hold',reason:'KEV_TIMEOUT',decisions:[]}});
+ assert.ok(before.metadata.candidateDiagnostics.eligible>0);
+ assert.equal(after.proposal.action,'hold');
+ assert.match(after.proposal.reason,/KEV_TIMEOUT/);
+ assert.doesNotMatch(after.proposal.reason,/等待 Kev 選擇/);
+ assert.deepEqual(after.metadata.candidateDiagnostics,before.metadata.candidateDiagnostics);
 });
 
 test('futures offers both directions for every pair and selects exactly the Kev-reviewed pair and side',async()=>{

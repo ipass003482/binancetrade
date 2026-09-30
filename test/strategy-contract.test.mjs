@@ -23,7 +23,8 @@ test('Kev snapshot contract gives Kev pair and direction authority with no candl
   assert.equal(contract.decisionCadence.atrTimeframe,null);assert.equal(contract.parameters.stopFraction,.005);
   assert.equal(contract.parameters.targetFraction,.015);assert.equal(contract.parameters.maxHoldingSeconds,900);
   assert.equal(contract.parameters.stopAtr,undefined);assert.equal(contract.entries.netRewardRiskGate,true);
-  assert.match(contract.entries.confirmation,/kev-native-entry-v1/);assert.match(contract.entries.selection,/Kev autonomously/);
+  assert.match(contract.entries.confirmation,/kev-native-entry-v3/);assert.match(contract.entries.selection,/Kev autonomously/);
+  assert.equal(contract.entrySignalPolicy.version,'kev-coherent-flow-v1');
   assert.deepEqual(contract.entries.actions,mode==='demo'?['buy']:['open-long','open-short']);
   assert.match(prompt,/不收集 K 線或 ATR/);assert.match(prompt,/不等待 Kronos/);
   assert.equal(demoStrategyContract(policy).entryPolicyVersion,'forecast-net-edge-v1','Historical default is preserved.');
@@ -42,7 +43,7 @@ test('v12 contract matches the staged config and separates direction, ATR cost s
  for(const mode of ['demo','demo-futures']){
   const contract=demoStrategyContract(await loadPolicy(mode)),prompt=renderDemoStrategyContract(contract);
   assert.equal(contract.ruleVersion,'kronos-direction-v12');
-  assert.equal(contract.exits.nativeVersion,'demo-rule-exits-v12');
+  assert.equal(contract.exits.nativeVersion,'demo-rule-exits-v13');
   assert.deepEqual(contract.entries.actions,mode==='demo'?['buy']:['open-long','open-short']);
   assert.equal(contract.directionCapabilities.short,mode==='demo'?null:'open-short');
   assert.equal(contract.directionCapabilities.shortReason,mode==='demo'?'SPOT_SHORT_REQUIRES_MARGIN':undefined);

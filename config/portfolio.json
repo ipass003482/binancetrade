@@ -4,7 +4,7 @@
   "maxGrossExposureUsdt": "400",
   "maxOpenRiskUsdt": "10",
   "maxDailyLossUsdt": "50",
-  "maxDrawdownUsdt": "100",
+  "maxDrawdownUsdt": "500",
   "maxSnapshotAgeSeconds": 15,
   "blockOppositeSameBase": true
 }

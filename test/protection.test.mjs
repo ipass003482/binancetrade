@@ -11,12 +11,12 @@ async function fixture(t,{futures=false,position=false}={}){
  const now=Date.now(),iso=new Date(now).toISOString(),mode=futures?'demo-futures':'demo';
  const pair=futures?'ETH/USDT:USDT':'ETH/USDT';
  const owner={mode,pid:101,childPid:102,at:new Date(now-30_000).toISOString()};
- const engine={strategy_version:'demo-rule-exits-v12',dry_run:false,demo_trading:true,runmode:'live',state:'running',exchange:'binance',
+ const engine={strategy_version:'demo-rule-exits-v13',dry_run:false,demo_trading:true,runmode:'live',state:'running',exchange:'binance',
   trading_mode:futures?'futures':'spot',margin_mode:futures?'isolated':'',strategy:futures?'CodexDemoFutures':'CodexDemoSpot',
   bot_name:futures?'binance-trade-demo-futures':'binance-trade-demo',timeframe:'5m',stoploss_on_exchange:true,
   order_types:{stoploss_on_exchange:true,stoploss:futures?'market':'limit',exit:'market',emergency_exit:'market',stoploss_on_exchange_interval:15},
   use_custom_stoploss:true,minimal_roi:{},trailing_stop:false};
- const state={version:'demo-native-stop-v1',engineVersion:'demo-rule-exits-v12',nativeEntryGuardVersion:'kronos-native-entry-v12',mode,processId:102,configured:true,asOf:iso,
+ const state={version:'demo-native-stop-v1',engineVersion:'demo-rule-exits-v13',nativeEntryGuardVersion:'kronos-native-entry-v12',mode,processId:102,configured:true,asOf:iso,
   capabilities:{[pair]:{status:'capability_validated',orderType:futures?'STOP_MARKET':'STOP_LOSS_LIMIT',reduceOnly:futures,
     destination:futures?'demo-fapi.binance.com':'demo-api.binance.com'}},attempts:[],activeStops:[],unresolvedStops:0};
  const account={engine,trades:[]};
@@ -47,7 +47,25 @@ test('Kev entries require the loaded native Kev guard while historical checks re
  assert.equal((await assertNativeProtection(f.args)).verified,true);
  f.args.entryPolicyVersion='kev-order-flow-v1';
  await rejects(f,'NATIVE_KEV_GUARD_RESTART_REQUIRED');
- f.state.kevEntryGuardVersion='kev-native-entry-v1';await f.save();
+ f.state.kevEntryGuardVersion='kev-native-entry-v1';await rejects(f,'NATIVE_KEV_GUARD_RESTART_REQUIRED');
+ f.state.kevEntryGuardVersion='kev-native-entry-v2';await rejects(f,'NATIVE_KEV_GUARD_RESTART_REQUIRED');
+ f.state.kevEntryGuardVersion='kev-native-entry-v3';await rejects(f,'NATIVE_KEV_EXIT_POLICY_RESTART_REQUIRED');
+ f.state.kevExitPolicies=['kev-net-harvest-v1'];await rejects(f,'NATIVE_KEV_SIGNAL_POLICY_RESTART_REQUIRED');
+ f.state.kevEntrySignalPolicies=['unknown'];await rejects(f,'NATIVE_KEV_SIGNAL_POLICY_RESTART_REQUIRED');
+ f.state.kevEntrySignalPolicies=['kev-coherent-flow-v1'];await f.save();
+ assert.equal((await assertNativeProtection(f.args)).verified,true);
+});
+
+test('Jev requires explicit loaded native provider capability while Kev remains usable',async t=>{
+ const f=await fixture(t);
+ f.args.entryPolicyVersion='kev-order-flow-v1';
+ Object.assign(f.state,{kevEntryGuardVersion:'kev-native-entry-v3',kevExitPolicies:['kev-net-harvest-v1'],
+  kevEntrySignalPolicies:['kev-coherent-flow-v1']});
+ await f.save();assert.equal((await assertNativeProtection(f.args)).verified,true);
+ f.args.decisionProvider='typesafe-api';
+ await rejects(f,'NATIVE_JEV_PROVIDER_RESTART_REQUIRED');
+ f.state.decisionProviders=['codex-cli'];await rejects(f,'NATIVE_JEV_PROVIDER_RESTART_REQUIRED');
+ f.state.decisionProviders=['codex-cli','typesafe-api'];await f.save();
  assert.equal((await assertNativeProtection(f.args)).verified,true);
 });
 

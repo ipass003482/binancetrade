@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -105,6 +106,7 @@ export async function readSupervisorView(file,{now=Date.now(),state=pidState}={}
 }
 export async function dashboardState(mode,{local=modeLocal(mode),policy:providedPolicy,client:providedClient,
  getTiming=timeMonitor,getDecision=loadDecisionConfig,getKevConfig=loadKevEntryConfig,now=()=>Date.now(),readSession=readDemoSession,session:providedSession,
+ readDiagnostics=readEntryDiagnostics,diagnosticsWaitMs=250,
  portfolioLocal=join(ROOT,'local','portfolio'),supervisorLocal=join(ROOT,'local','supervisor'),localFor=modeLocal}={}) {
  const started=now(),session=isDemo(mode)?(providedSession===undefined?await readSession({now:started}):providedSession):null;
  if(session)validateDemoSession(session,{now:started});
@@ -156,8 +158,8 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
  };
  const equity=scopedArtifact(value(3),'firstObservedAt','equity'),forward=scopedArtifact(value(4),'startedAt','forward'),portfolio=scopedArtifact(value(5),'startedAt','portfolio');
  let diagnostics=null,diagnosticsError=null;
- if(isDemo(mode)&&decision)try{diagnostics=await readEntryDiagnostics(local,{mode,ruleVersion:entryPolicyVersion??decision.ruleVersion,
-  allowance:operations.dailyEntryAllowance??null,now:observed,since:session?.startedAt??null});}catch(error){diagnosticsError=safeError(error);}
+ if(isDemo(mode)&&decision)try{diagnostics=await readDiagnostics(local,{mode,ruleVersion:entryPolicyVersion??decision.ruleVersion,
+  allowance:operations.dailyEntryAllowance??null,now:observed,since:session?.startedAt??null,waitMs:diagnosticsWaitMs});}catch(error){diagnosticsError=safeError(error);}
  return {mode,session,observedAt:new Date(observed).toISOString(),account,summary,trades,historyError,setup,engineError,decisions,tradingDisabled,stopped:await exists(join(local,'STOP')),
   operations,diagnostics,diagnosticsError,timing,equity,forward,portfolio,supervisor,protection,
   artifactErrors:[...sessionArtifactErrors,...values.flatMap((result,index)=>result.status==='rejected'?[{artifact:['operations','timing','strategy','equity','forward','portfolio','supervisor','protection'][index],code:safeError(result.reason)}]:[])],
@@ -167,14 +169,47 @@ export async function dashboardState(mode,{local=modeLocal(mode),policy:provided
   cycle:{stage:operations.cycle?.stage??'unknown',lastSuccessAt:operations.cycle?.lastSuccessAt??null},
   policy:{pairs:policy.pairs,...(isFutures(mode)?{marginMode:policy.marginMode,maxLeverage:policy.leverage,maxNotionalUsdt:policy.maxNotionalUsdt,maxTotalNotionalUsdt:policy.maxTotalNotionalUsdt}:{}),maxStakeUsdt:policy.maxStakeUsdt,maxExposureUsdt:policy.maxExposureUsdt,maxDailyLossUsdt:policy.maxDailyLossUsdt,maxOpenTrades:policy.maxOpenTrades,maxEntriesPerDay:policy.maxEntriesPerDay}};
 }
-const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/starfield.css','starfield.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs']]);
+const assets=new Map([['/','index.html'],['/app.mjs','app.mjs'],['/styles.css','styles.css'],['/starfield.css','starfield.css'],['/store.mjs','store.mjs'],['/timing.mjs','timing.mjs'],['/today.mjs','today.mjs'],['/capital.mjs','capital.mjs'],['/strategy.mjs','strategy.mjs'],['/settings','settings.html'],['/settings.css','settings.css'],['/settings.mjs','settings.mjs'],['/reviewer-store.mjs','reviewer-store.mjs']]);
 const types={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',mjs:'text/javascript; charset=utf-8'};
+const providerCall=name=>async args=>(await import('./decision-provider.mjs'))[name](args);
+const providerErrors=new Set(['PROVIDER_STATE_INVALID','PROVIDER_IO_ERROR','PROVIDER_BUSY','PROVIDER_REVISION_CONFLICT','PROVIDER_INVALID','JEV_KEY_INVALID','JEV_KEY_MISSING','JEV_KEY_NOT_VERIFIED','JEV_SECRET_FAILED','JEV_HTTP_AUTH','JEV_HTTP_RATE_LIMIT','JEV_HTTP_ERROR','JEV_NETWORK_ERROR','JEV_TIMEOUT','JEV_RESPONSE_INVALID','JEV_RESPONSE_TOO_LARGE','JEV_MODEL_UNAVAILABLE','JEV_ABORTED','JEV_CLOCK_INVALID','JEV_TIMEOUT_INVALID','JEV_REQUEST_INVALID']);
+const uuid=value=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+const nullableId=value=>value===null||uuid(value);
+const nullableTime=value=>value===null||typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value)&&Number.isFinite(Date.parse(value));
+// Project explicitly: even a faulty provider must never return credentials or upstream bodies.
+function providerStatusView(value){
+ if(!value||!['kev','jev'].includes(value.provider)||value.model!==(value.provider==='jev'?'jev-1.13.0':'gpt-6-luna')||
+  !nullableId(value.revision)||!nullableTime(value.changedAt)||!nullableId(value.credentialId)||typeof value.keyConfigured!=='boolean'||typeof value.keyVerified!=='boolean'||
+  !nullableTime(value.verifiedAt)||value.jev?.model!=='jev-1.13.0'||!nullableId(value.jev.credentialId)||!['missing','unverified','verified'].includes(value.jev.verificationStatus)||
+  (value.revision===null)!==(value.changedAt===null)||(value.provider==='kev'?value.credentialId!==null:!value.credentialId||!value.revision)||
+  value.keyConfigured!==(value.jev.credentialId!==null)||value.keyVerified!==(value.verifiedAt!==null)||
+  value.jev.verificationStatus!==(value.keyVerified?'verified':value.keyConfigured?'unverified':'missing')||value.keyVerified&&!value.keyConfigured)throw Object.assign(Error('PROVIDER_STATE_INVALID'),{code:'PROVIDER_STATE_INVALID'});
+ return {provider:value.provider,model:value.model,revision:value.revision,changedAt:value.changedAt,credentialId:value.credentialId,keyConfigured:value.keyConfigured,keyVerified:value.keyVerified,verifiedAt:value.verifiedAt,
+  jev:{model:value.jev.model,credentialId:value.jev.credentialId,verificationStatus:value.jev.verificationStatus}};
+}
+function reviewerBody(req,{limit=8192,timeoutMs=5000}={}){
+ return new Promise((resolve,reject)=>{
+  let bytes=0,chunks=[],settled=false;
+  const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);req.off('data',data);req.off('end',end);req.off('error',failed);req.off('aborted',aborted);chunks=[];
+   if(error){req.resume();reject(error);}else resolve(value);};
+  const problem=(code,status)=>Object.assign(Error(code),{code,status});
+  const data=chunk=>{bytes+=chunk.length;if(bytes>limit)return finish(problem('REVIEWER_BODY_TOO_LARGE',413));chunks.push(chunk);};
+  const end=()=>{try{const text=Buffer.concat(chunks).toString('utf8');const value=JSON.parse(text);if(!value||typeof value!=='object'||Array.isArray(value))throw Error();finish(null,value);}catch{finish(problem('REVIEWER_BODY_INVALID',400));}};
+  const failed=()=>finish(problem('REVIEWER_BODY_INVALID',400)),aborted=()=>finish(problem('REVIEWER_BODY_INVALID',400));
+  const timer=setTimeout(()=>finish(problem('REVIEWER_BODY_TIMEOUT',408)),timeoutMs);timer.unref?.();
+  req.on('data',data);req.on('end',end);req.on('error',failed);req.on('aborted',aborted);
+  if(req.headers['content-length']!==undefined&&(!/^\d+$/.test(req.headers['content-length'])||Number(req.headers['content-length'])>limit))finish(problem('REVIEWER_BODY_TOO_LARGE',413));
+ });
+}
+const exactKeys=(body,keys)=>Object.keys(body).length===keys.length&&keys.every(key=>Object.hasOwn(body,key));
 export async function dashboardMarket(pair,{mode}={}){
  const config=isDemo(mode)?await loadKevEntryConfig({local:modeLocal(mode),mode}):null;
  return config?.marketData==='order-flow'?marketOrderFlow(pair,{mode}):market(pair,{mode});
 }
-export function createDashboardServer({port=18100,state=dashboardState,quote=dashboardMarket,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope}={}) {
- const inflight=new Map(),cache=new Map();
+export function createDashboardServer({port=18100,state=dashboardState,quote=dashboardMarket,today=readTodayPnl,capital=readCapitalView,strategy=readStrategyReview,readSession=readDemoSession,readTodayScope=readActiveDemoScope,
+ providerRoot=ROOT,getProviderStatus=providerCall('getDecisionProviderStatus'),saveProviderKey=providerCall('saveJevKey'),verifyProviderKey=providerCall('verifyJevKey'),switchProvider=providerCall('switchDecisionProvider')}={}) {
+ const inflight=new Map(),cache=new Map(),csrfToken=randomBytes(32).toString('hex');
+ let providerMutation=false;
  async function cached(key,fn,ttl) {
   const old=cache.get(key);if(old&&Date.now()-old.at<ttl)return old.value;
   if(inflight.has(key))return inflight.get(key);
@@ -184,9 +219,40 @@ export function createDashboardServer({port=18100,state=dashboardState,quote=das
   const send=(status,value,type='application/json; charset=utf-8')=>{res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"});res.end(typeof value==='string'||Buffer.isBuffer(value)?value:JSON.stringify(value));};
   const host='127.0.0.1:'+port;
   if(req.headers.host!==host || (req.headers.origin&&req.headers.origin!=='http://'+host) || req.headers['sec-fetch-site']==='cross-site')return send(403,{error:'LOCAL_ORIGIN_REQUIRED'});
-  if(req.method!=='GET')return send(405,{error:'READ_ONLY_DASHBOARD'});
   try {
    const url=new URL(req.url,'http://'+host);
+   if(url.pathname.startsWith('/api/reviewer/')){
+    const admin=['/api/reviewer/jev-key','/api/reviewer/switch'].includes(url.pathname);
+    if(url.search)return send(400,{error:'REVIEWER_QUERY_REJECTED'});
+    if(url.pathname==='/api/reviewer/status'&&req.method==='GET'){
+     try{return send(200,{...providerStatusView(await getProviderStatus({root:providerRoot})),csrfToken});}
+     catch(error){return send(503,{error:providerErrors.has(error?.code)?error.code:'PROVIDER_IO_ERROR'});}
+    }
+    if(!admin)return send(req.method==='GET'?404:405,{error:req.method==='GET'?'NOT_FOUND':'READ_ONLY_DASHBOARD'});
+    if(req.method!=='POST')return send(405,{error:'REVIEWER_POST_REQUIRED'});
+    if(req.headers.origin!=='http://'+host)return send(403,{error:'LOCAL_ORIGIN_REQUIRED'});
+    const token=req.headers['x-reviewer-csrf'];
+    if(typeof token!=='string'||!/^[a-f0-9]{64}$/.test(token)||!timingSafeEqual(Buffer.from(token),Buffer.from(csrfToken)))return send(403,{error:'REVIEWER_CSRF_REJECTED'});
+    if(!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type']??'')||req.headers['content-encoding'])return send(415,{error:'REVIEWER_JSON_REQUIRED'});
+    let body;try{body=await reviewerBody(req);}catch(error){return send(error.status??400,{error:error.code??'REVIEWER_BODY_INVALID'});}
+    const saving=url.pathname==='/api/reviewer/jev-key';
+    if(saving?(!exactKeys(body,['apiKey'])||typeof body.apiKey!=='string'||body.apiKey.length<1||body.apiKey.length>4096||/[\x00-\x20\x7f]/.test(body.apiKey)):
+     (!['kev','jev'].includes(body.provider)||!exactKeys(body,['provider','expectedRevision',...(body.provider==='jev'?['expectedCredentialId']:[])])||!nullableId(body.expectedRevision)||body.provider==='jev'&&!uuid(body.expectedCredentialId)))return send(400,{error:'REVIEWER_BODY_INVALID'});
+    if(providerMutation)return send(409,{error:'PROVIDER_BUSY'});
+    providerMutation=true;
+    try{
+     let status;
+     if(saving){const saved=providerStatusView(await saveProviderKey({root:providerRoot,apiKey:body.apiKey}));body.apiKey='';
+      if(!saved.jev.credentialId)throw Object.assign(Error('PROVIDER_STATE_INVALID'),{code:'PROVIDER_STATE_INVALID'});
+      status=providerStatusView(await verifyProviderKey({root:providerRoot,credentialId:saved.jev.credentialId}));
+      if(status.jev.credentialId!==saved.jev.credentialId||!status.keyVerified)throw Object.assign(Error('PROVIDER_REVISION_CONFLICT'),{code:'PROVIDER_REVISION_CONFLICT'});
+     }else status=await switchProvider({root:providerRoot,provider:body.provider,expectedRevision:body.expectedRevision,...(body.provider==='jev'?{expectedCredentialId:body.expectedCredentialId}:{})});
+     return send(200,{...providerStatusView(status),csrfToken});
+    }catch(error){const code=providerErrors.has(error?.code)?error.code:'PROVIDER_IO_ERROR';
+     return send(['PROVIDER_BUSY','PROVIDER_REVISION_CONFLICT','JEV_KEY_NOT_VERIFIED','JEV_KEY_MISSING'].includes(code)?409:code==='JEV_TIMEOUT'?504:code.startsWith('JEV_')?502:503,{error:code});
+    }finally{if(saving)body.apiKey='';providerMutation=false;}
+   }
+   if(req.method!=='GET')return send(405,{error:'READ_ONLY_DASHBOARD'});
    const session=['/api/today-pnl','/api/strategy-review'].includes(url.pathname)||url.pathname==='/api/dashboard'&&isDemo(url.searchParams.get('mode')??'dry-run')?await readSession():null;
    // Keep the execution/dashboard session authoritative while allowing the
    // PnL card to start a fresh, explicitly archived reporting scope. Tests and

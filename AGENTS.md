@@ -1,3 +1,253 @@
+# 2026-09-30 Astra-reviewed JEV prompt v2 amendment
+
+Read docs/jev-astra-prompt-v2-2026-09-30.md. JEV requests now carry
+reviewerDecisionPolicyVersion=jev-host-ranked-choice-v2. Only q0 is the first
+host-ranked candidate; later q options require all predecessors to be blocked.
+Intentional partial tape samples, absent forecasts, cost scenarios, target
+geometry and rejected-candidate diagnostics are not automatic data failures.
+Host ranking, eligibility, thresholds, execution guards and exits are unchanged.
+Preserve the active goal, provider, history and the shared 500 USDT drawdown
+limit. This correction removes prompt ambiguity; it does not prove higher net
+win rate. Verify original fresh JEV requests in both modes after host reload.
+Evidence: local/jev-astra-prompt-v2-2026-09-30/.
+
+# 2026-09-30 Explicit shared Demo drawdown limit amendment
+
+The user explicitly raised the shared Demo maximum drawdown from 100 to 500 USDT.
+Both config/portfolio.json and the validated hard ceiling in src/portfolio.mjs
+must accept 500 and reject anything above it. Stop new entries at historical
+sampled drawdown >= 500; preserve the durable drawdown latch and full sample
+chain. This overrides older instructions retaining the 100 USDT limit only.
+Keep capital 2000, gross exposure 400, open risk 10 and daily loss 50 USDT.
+Do not reset portfolio baseline, losses, samples, provider, goal or order history.
+JEV remains exclusive typesafe-api / jev-1.13.0; read active.json dynamically
+(the latest fresh cohort starts 2026-09-30T00:46:04.385Z, total 200, each 100).
+Use controlled host reload, preserve native protection, and verify fresh source
+fingerprints and reports. Evidence: local/portfolio-drawdown-2026-09-30/.
+Raising a loss limit is not evidence of improved win rate or profitability.
+
+# 2026-09-30 JEV ranked-selection prompt amendment
+
+Read docs/jev-ranked-prompt-2026-09-30.md. The former “sufficiently supported”
+phrase let JEV add a subjective HOLD hurdle after the host had already ranked
+hard-eligible candidates. New JEV requests carry
+reviewerDecisionPolicyVersion=jev-host-ranked-choice-v1: select host-ranked q0
+by default; use HOLD only for concrete blockers visible in supplied evidence,
+and only when every offered candidate is blocked. Do not change host eligibility,
+flow, cost, risk, native protection or exits; do not force entry. Preserve the
+JEV-only 200-entry goal, evidence and all historical PnL. Passing tests or a
+lower HOLD rate cannot establish better net PnL or win rate. Use a controlled
+host-only reload and verify current TypeSafe JEV selection plus a fresh request
+from each mode before claiming activation; native processes/protection remain
+untouched.
+
+# 2026-09-30 JEV prospective candidate-sized exit evidence
+
+The user requested a remedy for low JEV win rate. Actual active.json now points
+to jev-demo-200-each-reset-20260929124915 (JEV-only, 100 per mode, total 200);
+read it dynamically. Actual selected provider remains typesafe-api / jev-1.13.0.
+Do not restore the historical Kev defaults or reset this goal from older text.
+Read docs/jev-performance-2026-09-30.md and local/jev-performance-2026-09-30/.
+
+Request v5 now includes kev-sized-exit-evidence-v1: proposed-not-filled notional
+ceiling, native fee cash scenarios, shared trailing/harvest thresholds and target
+precedence geometry. Candidate questions distinguish fee-inclusive opportunity
+from mere host eligibility. No numerical entry gate or native exit was changed.
+Keep the original 0.5% stop, 1.5% gross target, 900-second cap, 0.50/0.25 USDT
+net trail, and kev-net-harvest-v1. Native guard v3 / exit engine v13 remain.
+An independently verified formula or passing tests are not profitability proof.
+Preserve historical losses, raw approvals, the active goal and all exclusions;
+evaluate future filled trades by original request version/source fingerprint.
+Controlled host-only reload must preserve native processes and protection.
+
+# 2026-09-29 Explicit fresh-accounting reset — historical user instruction
+
+The user explicitly asked to clear the current count and recalculate. The active
+reporting cohort is `local/trade-goals/kev-demo-200-each-reset-20260929073922/goal.json`,
+started `2026-09-29T07:39:22.441Z` and ending `2026-10-29T07:39:22.441Z`.
+Target remains 100 Spot plus 100 Futures; verified initial count was 0/200.
+All prior Spot trade IDs 1–538 and Futures IDs 1–131 are excluded from this new
+cohort. Their exchange history, journals, approvals, losses, previous goal and
+execution session are retained unchanged; this reset changes the accounting
+window, not financial history or strategy. Kev remains the active reviewer.
+Carry forward the prospective reviewer allowlist with effectiveFrom at the new
+goal start so the user's installed Jev switch stays eligible after a later
+explicit switch. See `docs/kev-reporting-recount-2026-09-29.md` and
+`local/kev-reset-2026-09-29-recount/` for the complete read-only verification,
+baseline and reset evidence. No order was submitted.
+
+# 2026-09-29 Optional Jev reviewer — latest explicit user authority
+
+The user explicitly requested keeping Kev active while fully preparing a real
+TypeSafe Jev integration requiring only their API key and a later manual switch.
+Read docs/jev-switch-2026-09-29.md. Default remains Kev gpt-6-luna / max.
+The authorized optional reviewer is pinned jev-1.13.0 at the official TypeSafe
+HTTPS endpoint, with DPAPI-protected credentials and an explicit local UI switch.
+Do not represent the old local jev-latest Codex alias as actual Jev inference.
+
+Preserve all existing core signals, costs, deadlines, risk, protection, goal
+start/deadline/target/exclusions and historical losses. New Jev receipts must
+identify typesafe-api and bind the original upstream answer, snapshot and
+selection revision at host and native callback/context/wire. No silent fallback,
+deadline extension, forced entry, manual orders, live/UTA or automatic commit.
+The goal's additive reviewerPolicy allows prospective Jev approvals only; test
+calls are never progress. An API-key access check is not a profitability test.
+
+# 2026-09-29 Coherent core entry — retained explicit user authority
+
+The user explicitly ordered the CORE entry strategy changed, superseding older
+restrictions below on preserving static book-direction agreement and two-minute
+confirmation. Read docs/kev-core-entry-2026-09-29.md. New Demo snapshots bind
+kev-coherent-flow-v1, original request v5 and native guard v3. Common-window
+two-interval tape pressure plus bid/ask response replaces disconnected signal
+windows and standing-depth sign veto. No signal may be fabricated or refreshed.
+
+Preserve all cost, clock, freshness, shock, spread, portfolio, position, size,
+risk, quote-drift and approval gates and existing net-harvest/stops/trail/time
+exits. Native callback/context/wire must independently verify the original
+policy and raw evidence. Require fresh v3 signal capability and loaded watcher
+cycles before claiming activation. Old plans/snapshots retain original semantics.
+
+Preserve active 100+100 goal, session, journal, approvals, fills and full losses.
+No new count reset, manual entries, real-money/UTA or automatic commits/pushes.
+Historical quote markouts are incomplete research; tests and more candidates
+do not establish higher win rate. Record actual future net closes separately
+by immutable signal policy. Deployment: local/kev-core-entry-2026-09-29/.
+
+# 2026-09-29 Native net harvest and bounded Kev requests
+
+The user renewed the request to fix persistent fee losses and HOLD. New Demo
+plans carry immutable exitPolicy kev-net-harvest-v1 and native guard v2. Read
+docs/kev-net-harvest-2026-09-29.md. This is a prospective Demo hypothesis,
+not proof of improved win rate or expectancy and not promotion of the earlier
+replacement staged arm. Preserve the original plans, losses, approvals,
+session and active 100+100 goal.
+
+Preserve stop, gross target, trailing, risk and 900-second cap. Add net exits
+after 300 seconds at 1 USDT and after 600 seconds at 10bps of actual filled
+entry notional, with a 5bps adverse exit reserve. Fees/funding are counted once.
+Bind the exact reviewed policy at plan/callback/context/wire. Require loaded
+native v13/v2 and fresh kevExitPolicies capability before resuming entries.
+
+Bound Kev v4 requests by bytes and candidate count: remove only the weakest
+suffix of the existing ranked list, never parts of offered evidence. Preserve
+original timestamps, execution reserve and complete local audit. Do not loosen
+flow agreement, force orders or add unvalidated signal filters. A positive-net
+quote or replay is never a guaranteed profitable fill.
+
+# 2026-09-29 Consensus and review freshness — latest execution amendment
+
+Read docs/kev-consensus-review-2026-09-29.md. Collect one immutable completed
+sampler publication after quote requests finish, before candidate evaluation.
+Keep original evidence timestamps. Bound Kev review by the earliest offered
+proof expiry and minute deadline, retaining the execution reserve. Never
+replace evidence after approval or extend its freshness to manufacture entries.
+
+The detached consensus benchmark is incomplete quote research, not filled PnL
+or win rate. Its results do not support promoting relaxed agreement gates.
+Preserve the active 200-entry goal, original losses and confirmation semantics.
+Deployment evidence: local/kev-fresh-review-2026-09-29/.
+
+# 2026-09-29 Multi-agent HOLD recovery — retained execution amendment
+
+The user renewed the request to repair low win rate, HOLD and missing entries.
+Read docs/kev-hold-recovery-2026-09-29.md. Preserve the active 200-entry goal,
+all losses, original approvals, journal and execution session. This is not a
+new reporting reset. Native stops, target, time exit, trailing and fees remain.
+
+Retain per-pair raw book history through an isolated fetch failure only inside
+the collector; never publish a cached failed proof as fresh. Every recovered
+sample still passes the original clock, age, gap, tape and book checks. Exclude
+known cross-mode opposite positions before spending Kev request time, using
+fresh checked Demo account evidence; the locked bridge portfolio recheck stays
+authoritative. Neither change authorizes an extra or forced entry.
+
+Both-mode quote-depth archives are bounded, nonblocking research evidence.
+Explicitly retain gaps/drops and funding unknowns; displayed depth is not a
+fill. Do not tune exits from sampled PnL peaks. Zero-net closes count as losses.
+Use actual net PnL and filled-trade win rate to evaluate future outcomes.
+
+Deployment evidence: local/kev-hold-recovery-2026-09-29/. Native engines stay
+running if native sources are unchanged and protection is verified. Require
+fresh loaded watcher cycles and supervisor recovery before claiming activation.
+
+# 2026-09-28 Multi-agent Demo reliability and fresh 200-entry cohort
+
+The user explicitly requested multiple agents to improve low win rate, repair
+excessive HOLD and restart the 200-entry count. Preserve the established split:
+100 Spot and 100 Futures, with a new 30-day reporting window. Read active.json
+dynamically; never delete losses or change historical approvals, journals,
+plans or the execution session. Only new approved actual entry fills count.
+
+Keep Kev gpt-6-luna / max, balanced selection, existing stops, fee accounting,
+quote/clock/freshness checks and risk limits. Repair operational faults rather
+than manufacture entries. A specifically allowlisted transient error during
+read-only account/cost/market observation may wait for the next normal cycle;
+it is not a successful decision and must not refresh success timestamps.
+Manual STOP, invalid/skewed/jumping clocks, unresolved submissions and errors
+after execution starts remain fail-closed. Surface waiting_data separately
+from discretionary HOLD and permanent faults.
+
+Kev's adapter owns the structured probability response schema. Do not add a
+conflicting choice-only format in the request. Compact only nonselectable
+diagnostics; retain selectable quote, book, tape and cost evidence and the full
+local audit. Preserve the exact request/time budget even on a timeout. Fresh
+fee facts may be prefetched for one exact upcoming decision slot, retaining
+their original timestamp and all cost validation; never reuse a consumed slot
+or use unavailable/stale facts to trade.
+
+The pre-reset cohort is 76 closed entries, 21W/55L, net -8.42861235 USDT.
+Actual fill-price component is +1.77985409 and fee equivalents 10.20846716.
+No native exit or fee-accounting defect was demonstrated. Prompt compaction
+does not prove latency or profit improvement; evaluate the new cohort using
+both win rate and fee-inclusive net PnL. Full executable quote paths remain
+insufficient to promote staged exits. Do not claim simulated classification
+or tests are trades. No live/UTA, automatic commits or pushes.
+
+Deployment evidence: local/kev-resilience-2026-09-28/ and
+local/kev-reset-2026-09-28/. Require tested sources and fresh loaded watcher
+cycles before claiming activation. Native engines need not restart when their
+runtime sources are unchanged and current protection evidence is verified.
+
+# 2026-09-24 Kev balanced / 200-entry forward cohort — retained authority
+
+The user explicitly authorized revising the Kev plan and restarting a 200-entry
+Demo test, not limited to one day. Interpret the previously explicit “Spot 100,
+Futures 100” as target scope `each`, count 100 (200 total), with a 30-day
+observation window. Do not delete or rewrite any old exchange history, journals,
+goals, sessions, or immutable entry plans. Existing positions keep their
+original plans and are excluded from the new cohort. The 200 target counts only
+distinct actual Kev-approved strategy entry fills after the new goal start; it
+does not permit forced orders or looser gates.
+
+Active Kev selection must use `decisionStyle=balanced`. Aggressive prompting or
+selection rules are prohibited in the live Kev order-flow path. Kev may HOLD
+when evidence is incomplete, contradictory, stale, or not sufficiently
+cost-adjusted; probability values are uncalibrated. Do not loosen flow
+agreement, freshness, costs, quote drift, risk, position, timing, or native
+protection. Order eligible candidates by auditable cost/flow fields only to
+bound the request, then let Kev select at most one or HOLD. Every HOLD audit
+must retain its reason, native-eligible count, quote/book/tape ages, and whether
+Kev selected a qualified candidate.
+
+The requested staged exit rule is NOT promoted: the old 84-entry data has
+API-read PnL observations but no timestamped executable quote path with which
+to replay target fills. Kline highs/lows and sampled open-PnL peaks are not
+executable fills. The 84-entry fixed-target baseline is 28W/56L, net
+-8.12596627 USDT, PF 0.5791; exits: target 1 / +1.09513821, time 49 /
+-4.28900965, stop 32 / -6.25294121, net-profit trail 2 / +1.32084638.
+Staged-exit comparative net, win rate, PF, drawdown, and exit cohorts remain
+unknown. Preserve existing 0.5% stop, fixed 1.5% exit target, 15-minute cap,
+$0.50/$0.25 trailing, $10 max open risk, costs, and every other strategy group.
+The forward goal may test balanced selection with existing exits; never label
+this as proof that staged exits improve results. Require valid spot/futures
+quote replay and evidence of improvement before enabling staged exits.
+
+The 30-day target deadline does not stop Demo execution. Reaching a count,
+deadline, or starting a new reporting goal never clears historical records or
+closes positions. Preserve all runtime state unless the user separately
+authorizes a change. Do not push or commit automatically.
+
 # 2026-09-22 Multi-agent loss audit — current execution amendment
 
 # 2026-09-22 Kev Demo reporting cohort — current goal

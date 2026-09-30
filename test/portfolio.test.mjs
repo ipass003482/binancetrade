@@ -58,7 +58,7 @@ test('shared portfolio includes native stop reserve for new entries and marked o
 test('checked config fixes the shared budget and preserves hard guard ceilings',async()=>{
  assert.deepEqual(await loadPortfolioConfig(),config());
  for(const [name,value] of Object.entries({capitalUsdt:'2001',maxGrossExposureUsdt:'1051',maxOpenRiskUsdt:'10.01',maxDailyLossUsdt:'51',
-  maxDrawdownUsdt:'101',maxSnapshotAgeSeconds:16,blockOppositeSameBase:false,version:2}))
+  maxDrawdownUsdt:'500.00000001',maxSnapshotAgeSeconds:16,blockOppositeSameBase:false,version:2}))
   assert.throws(()=>validatePortfolioConfig({...config(),[name]:value}),/PORTFOLIO_CONFIG_INVALID/);
  for(const value of [null,true,'',Infinity,'1e999','-1','0'])assert.throws(()=>validatePortfolioConfig({...config(),capitalUsdt:value}),/PORTFOLIO_CONFIG_INVALID/);
  assert.equal(validatePortfolioConfig({...config(),maxDailyLossUsdt:'20'}).maxDailyLossUsdt,'20');
@@ -139,14 +139,40 @@ test('missing risk plans, invalid marks, partial orders and daily data are fail 
 test('drawdown breach stays latched when budget equity later recovers',()=>{
  const marker=baseline(),samples=[
   {source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:10:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:'2010'},
-  {source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:20:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:'1900'}];
- const r=report({marker,samples});assert.equal(r.budgetEquityUsdt,'2000');assert.equal(r.sampledMaxDrawdownUsdt,'110');
+  {source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:20:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:'1490'}];
+ const r=report({marker,samples});assert.equal(r.budgetEquityUsdt,'2000');assert.equal(r.sampledMaxDrawdownUsdt,'520');
  assert.equal(r.currentDrawdownUsdt,'10');assert.equal(r.drawdownLimitBreached,true);
  const g=guard();g.performance=r;rejects(g,'PORTFOLIO_DRAWDOWN_LIMIT');
 });
 
+test('raising the authorized drawdown threshold retains losses and the full sampled peak-to-trough history',()=>{
+ const samples=[
+  {source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:10:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:'2010'},
+  {source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:20:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:'1899'}];
+ const histories=history();histories.demo=[closed(1,'-100')];
+ const before=report({histories,samples,config:{...config(),maxDrawdownUsdt:'100'}});
+ const after=report({histories,samples});
+ assert.equal(before.drawdownLimitBreached,true);assert.equal(after.drawdownLimitBreached,false);
+ for(const field of ['startedAt','capitalUsdt','netRealizedUsdt','netPnlUsdt','budgetEquityUsdt','sampledMaxDrawdownUsdt','currentDrawdownUsdt','sampleCount'])
+  assert.equal(after[field],before[field]);
+ assert.equal(after.netRealizedUsdt,'-100');assert.equal(after.sampledMaxDrawdownUsdt,'111');
+ const g=guard();g.performance=after;assert.equal(assessPortfolio(g).checked,true);
+});
+
+test('both Demo modes allow below $500 drawdown and latch at or above the exact threshold',()=>{
+ for(const mode of modes)for(const [equity,breached] of [['1500.00000001',false],['1500',true],['1499.99999999',true]]){
+  const samples=[{source:PORTFOLIO_SOURCE,asOf:'2026-09-10T12:20:00Z',startedAt,capitalUsdt:'2000',evidenceComplete:true,budgetEquityUsdt:equity}];
+  const g=guard();g.performance=report({samples});g.mode=mode;
+  if(mode==='demo-futures'){
+   g.proposal={action:'open-long',pair:'BTC/USDT:USDT',stakeUsdt:'50',leverage:1};g.entryPlan=plan(g.proposal.pair);
+  }
+  assert.equal(g.performance.drawdownLimitBreached,breached);
+  if(breached)rejects(g,'PORTFOLIO_DRAWDOWN_LIMIT');else assert.equal(assessPortfolio(g).checked,true);
+ }
+});
+
 test('capital allocation uses budget equity after actual losses, never exchange wallet equity',()=>{
- const lower={...config(),capitalUsdt:'100',maxGrossExposureUsdt:'100'},histories=history();histories.demo=[closed(1,'-1')];
+ const lower={...config(),capitalUsdt:'100',maxGrossExposureUsdt:'100',maxDrawdownUsdt:'100'},histories=history();histories.demo=[closed(1,'-1')];
  const g=guard();g.config=lower;g.proposal.stakeUsdt='100';g.entryPlan.maxEntryNotionalUsdt=100;
  g.performance=report({histories,config:lower});rejects(g,'PORTFOLIO_CAPITAL_LIMIT');
 });

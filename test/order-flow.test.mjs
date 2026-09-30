@@ -67,7 +67,31 @@ test('book alignment uses the latest two depth samples and ignores one noisy fir
  const blocked=assessOrderFlow(currentMismatch,args);
  assert.equal(blocked.eligible,false);
  assert.equal(blocked.bookDirection,null);
- assert.equal(blocked.reason,'FLOW_TAPE_BOOK_MISMATCH');
+ assert.equal(blocked.reason,'FLOW_BOOK_CONSENSUS_MISSING');
+});
+test('flow HOLD reasons distinguish true opposition, unavailable direction, weak share and undecided evidence without changing entry eligibility',()=>{
+ const base=proof(),args={mode:base.mode,pair:base.pair,long:true,now};
+ const opposite=structuredClone(base);
+ opposite.trades.forEach(t=>{t.m=true;});
+ assert.equal(assessOrderFlow(opposite,args).reason,'FLOW_TAPE_BOOK_MISMATCH');
+
+ const sellPressure=structuredClone(opposite);
+ for(const book of sellPressure.books){for(const row of book.bids)row[1]='1';for(const row of book.asks)row[1]='2';}
+ const unsupported=assessOrderFlow(sellPressure,args);
+ assert.equal(unsupported.eligible,false);
+ assert.equal(unsupported.tapeDirection,'sell');
+ assert.equal(unsupported.bookDirection,'sell');
+ assert.equal(unsupported.reason,'FLOW_REQUESTED_DIRECTION_UNSUPPORTED');
+
+ const weakShare=structuredClone(base);
+ weakShare.trades.forEach((trade,i)=>Object.assign(trade,{p:'1',q:['.27','.27','.46'][i],m:i===2}));
+ assert.equal(assessOrderFlow(weakShare,args).reason,'FLOW_TAKER_SHARE_BELOW_MINIMUM');
+ weakShare.trades[2].q='.44';
+ assert.equal(assessOrderFlow(weakShare,args).eligible,true);
+
+ const tiedTape=structuredClone(base);
+ tiedTape.trades.forEach((trade,i)=>Object.assign(trade,{p:'1',q:['1','1','2'][i],m:i===2}));
+ assert.equal(assessOrderFlow(tiedTape,args).reason,'FLOW_TAPE_DIRECTION_UNDETERMINED');
 });
 function args(short=false,reclaim=false){
  const flow=proof(short),mode=flow.mode,pair=flow.pair;

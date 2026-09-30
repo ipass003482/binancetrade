@@ -46,7 +46,7 @@ export function attachCosts(snapshot,facts,config){
 // already in the quotes and MUST NOT be charged a second time. They describe
 // fees and hypothetical exits, never a forecast, win rate or account balance.
 const CostDecimal=Decimal.clone({precision:40});
-export function executableCostEconomics({mode,action,market,stopFraction,targetFraction}){
+export function executableCostEconomics({mode,action,market,stopFraction,targetFraction,maxHoldingSeconds=null}){
  const invalid=()=>{throw Error('KEV_COST_ECONOMICS_INVALID');};
  const number=value=>{
   if(!['string','number'].includes(typeof value)||String(value).length>100)invalid();
@@ -54,6 +54,7 @@ export function executableCostEconomics({mode,action,market,stopFraction,targetF
   if(!result.isFinite()||Math.abs(result.e)>50)invalid();return result;
  };
  const long=action!=='open-short',cost=market?.entryCost;
+ if(maxHoldingSeconds!==null&&(!Number.isSafeInteger(maxHoldingSeconds)||maxHoldingSeconds<=0))invalid();
  if(!['demo','demo-futures'].includes(mode)||!(mode==='demo'?['buy']:['open-long','open-short']).includes(action)||cost?.status!=='ok')invalid();
  const bid=number(market.bid),ask=number(market.ask),buy=number(cost.buyRate),sell=number(cost.sellRate),
   slip=number(cost.slippageBpsPerSide).div(10000),fund=number(cost.fundingReserveBps).div(10000),
@@ -99,5 +100,15 @@ export function executableCostEconomics({mode,action,market,stopFraction,targetF
   targetExitQuotePrice:price(targetQuote),targetNetUsdtPer100:money(netAt(targetQuote)),
   stopExitQuotePrice:price(stopQuote),stopNetUsdtPer100:money(netAt(stopQuote)),
   stopScenario:'planned stop trigger quote plus modeled exit slippage; excludes additional stop-limit stress reserve used by native sizing',
+  // These fixed quote scenarios explain the cost hurdle during the supplied
+  // holding horizon. Time does not scale a sampled move or promise this exit:
+  // a timer can close below break-even even when the fixed target is profitable.
+  // Reuse netAt so fees, slippage, spread and reserved funding occur once;
+  // the policy's net buffer is a threshold, not another cash expense.
+  holdingHorizon:{version:'kev-cost-horizon-v1',maxHoldingSeconds,
+   breakEvenFavorableExitQuoteMoveBps:breakEven.div(currentExitQuote).minus(1).mul(sign).mul(10000).toFixed(8),
+   netUsdtPer100ByFavorableExitMoveBps:Object.fromEntries([0,10,20,30].map(bps=>[bps,
+    money(netAt(currentExitQuote.mul(new CostDecimal(1).plus(new CostDecimal(bps).div(10000).mul(sign)))))])),
+   attainmentProbability:null,forecast:false},
   forecast:false};
 }

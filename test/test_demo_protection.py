@@ -95,6 +95,11 @@ def create(native):
 def test_installed_native_stop_create_query_cancel_all_route_demo(native):
     state = native.exchange.demo_protection_capabilities()
     assert state['stopPriceVersion'] == 'stable-unarmed-stop-v1'
+    assert state['engineVersion'] == 'demo-rule-exits-v13'
+    assert state['kevEntryGuardVersion'] == 'kev-native-entry-v3'
+    assert state['kevEntrySignalPolicies'] == ['kev-coherent-flow-v1']
+    assert state['decisionProviders'] == ['codex-cli', 'typesafe-api']
+    assert state['kevExitPolicies'] == ['kev-net-harvest-v1']
     assert state['riskPolicyVersion'] == 'native-stop-risk-v1'
     assert state['stopLimitRatio'] == (None if native.futures else .995)
     assert state['capabilities'][native.pair]['status'] == 'capability_validated'

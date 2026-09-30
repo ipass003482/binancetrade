@@ -149,7 +149,19 @@ export function assessOrderFlow(proof,{mode,pair,long,now,minTakerShare='.55',mi
   const depthWithinBounds=imbalances.every(v=>v.abs().lte(maximumDepth));
   const movement=long?midChangeBps.gte(minimumMove):midChangeBps.lte(minimumMove.neg());
   const eligible=tapeAligned&&depth&&depthWithinBounds&&movement;
-  const reason=eligible?null:!tapeAligned||!bookAligned||!directionsAgree?'FLOW_TAPE_BOOK_MISMATCH':!depthWithinBounds?'FLOW_BOOK_IMBALANCE_TOO_LARGE':'FLOW_MID_MOVE_NOT_CONFIRMED';
+  // Keep the entry gate unchanged. These are distinct reasons for an ineligible
+  // candidate: a genuinely opposing tape/book, an undecided book, pressure on
+  // the unavailable side, and a same-side tape below the required 55% share.
+  // Combining them as MISMATCH obscures whether sampling or market direction
+  // needs attention and can encourage unsafe threshold changes to cure HOLDs.
+  const reason=eligible?null:
+   tapeDirection===null?'FLOW_TAPE_DIRECTION_UNDETERMINED':
+   bookDirection===null?'FLOW_BOOK_CONSENSUS_MISSING':
+   !directionsAgree?'FLOW_TAPE_BOOK_MISMATCH':
+   tapeDirection!==requestedDirection?'FLOW_REQUESTED_DIRECTION_UNSUPPORTED':
+   !tapeAligned?'FLOW_TAKER_SHARE_BELOW_MINIMUM':
+   !depthWithinBounds?'FLOW_BOOK_IMBALANCE_TOO_LARGE':
+   'FLOW_MID_MOVE_NOT_CONFIRMED';
   return {status:'ok',eligible,reason,takerShare:share.toFixed(),minimumTakerShare:minimum.toFixed(),bookImbalances:imbalances.map(v=>v.toFixed()),
    midChangeBps:midChangeBps.toFixed(),minimumMidChangeBps:minimumMove.toFixed(),maximumDepthImbalance:maximumDepth.toFixed(),depthWithinBounds,
    tapeDirection,bookDirection,requestedDirection,tapeAligned,bookAligned,directionsAgree,alignmentVersion:FLOW_ALIGNMENT_VERSION,

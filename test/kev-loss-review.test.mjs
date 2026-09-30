@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {buildKevLossReview,main} from '../scripts/kev-loss-review.mjs';
+import {KEV_NET_HARVEST_POLICY} from '../src/kev-exit-policy.mjs';
+import {KEV_ENTRY_SIGNAL_POLICY} from '../src/kev-entry-signal.mjs';
 
 const start=Date.parse('2026-09-21T06:00:00Z'),fingerprint='a'.repeat(64),prediction='b'.repeat(64);
 const canonical=v=>Array.isArray(v)?v.map(canonical):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])])):v;
@@ -49,7 +51,8 @@ function fixture(specs=[{}]){
    entryEvidence:{version:spec.flow?'kev-order-flow-evidence-v1':'kronos-ai-evidence-v1',snapshotId:snapshot,usedForEntryDecision:true,proofSha256:'e'.repeat(64),kevReview:receipt},
    ...(spec.flow?{entrySignalEngine:'kev_order_flow',riskPolicy:{version:'native-stop-risk-v1',mode,stopLimitRatio:mode==='demo'?'0.995':null,reserveFraction:mode==='demo'?'0.005':'0'}}:{})};
   const plan={tag,pair,snapshotId:snapshot,entryEvidence:pending.entryEvidence,
-   ...(spec.flow?{nativeEntryGuard:{kevReviewSha256:createHash('sha256').update(reviewRaw).digest('hex')}}:{})};
+   ...(spec.flow?{entryPolicyVersion:'kev-order-flow-v1',ruleVersion:'kev-order-flow-v1',entrySignalEngine:'kev_order_flow',
+    nativeEntryGuard:{kevReviewSha256:createHash('sha256').update(reviewRaw).digest('hex')}}:{})};
   artifacts[mode][id]={reviewRaw,snapshotRaw:JSON.stringify(rawSnapshot),planRaw:JSON.stringify(plan)};
   histories[mode].trades.push(trade);journals[mode].push(pending,{id,at:new Date(opened+1000).toISOString(),status:'submitted',action,tradeId:n,pair,tag});
  }
@@ -59,6 +62,118 @@ function fixture(specs=[{}]){
 }
 const near=(actual,expected)=>assert.ok(actual!==null&&Math.abs(Number(actual)-expected)<1e-9,`${actual} != ${expected}`);
 
+function setOriginalPolicy(input,index=0,edit=()=>{}){
+ const pending=input.journals.demo.filter(r=>r.status==='pending')[index],artifact=input.artifacts.demo[pending.id],
+  review=JSON.parse(artifact.reviewRaw),plan=JSON.parse(artifact.planRaw);
+ plan.exitPolicy={...KEV_NET_HARVEST_POLICY};pending.exitPolicy={...KEV_NET_HARVEST_POLICY};
+ review.request.state.requestVersion='kev-flow-request-v4';review.request.state.exitPolicy={...KEV_NET_HARVEST_POLICY};
+ review.request.state.candidates[0].exitPolicyVersion=KEV_NET_HARVEST_POLICY.version;
+ edit({pending,plan,review});
+ delete review.proofSha256;review.proofSha256=digest(review);pending.entryEvidence.kevReview.proofSha256=review.proofSha256;
+ artifact.reviewRaw=JSON.stringify(review);plan.entryEvidence=structuredClone(pending.entryEvidence);
+ plan.nativeEntryGuard.kevReviewSha256=createHash('sha256').update(artifact.reviewRaw).digest('hex');artifact.planRaw=JSON.stringify(plan);
+ return {pending,artifact};
+}
+
+function reviewerPolicy(input,effectiveFrom=new Date(start+1000).toISOString()){
+ input.goal.reviewerPolicy={version:'decision-provider-policy-v1',effectiveFrom,
+  allowed:[{version:'jev-typesafe-entry-v1',provider:'typesafe-api',model:'jev-1.13.0'}]};
+ if(input.amendment)input.amendment.goalSha256=createHash('sha256').update(JSON.stringify(input.goal)).digest('hex');
+}
+function setOriginalProvider(input,index=0,provider='typesafe-api',edit=()=>{}){
+ const pending=input.journals.demo.filter(r=>r.status==='pending')[index],artifact=input.artifacts.demo[pending.id],
+  review=JSON.parse(artifact.reviewRaw),plan=JSON.parse(artifact.planRaw),snapshot=JSON.parse(artifact.snapshotRaw),
+  jev=provider==='typesafe-api',version=jev?'jev-typesafe-entry-v1':'kev-codex-entry-v1',model=jev?'jev-1.13.0':'gpt-6-luna',
+  revision='12345678-1234-4234-9234-123456789abc',state=review.request.state;
+ Object.assign(review,{provider,providerRevision:revision,version,actualModel:model});
+ snapshot.kevEntry={enabled:true,version,provider,model,providerRevision:revision};
+ state.decisionProvider={provider,model,revision};
+ review.response.backend.actual_model=model;
+ if(jev){
+  review.request.model=review.response.model=model;review.requestId=review.response.request_id=snapshotId(index+900);
+  review.response.created_at=review.completedAt;review.response.answers.entry.confidence=.7;
+  review.response.usage={input_tokens:42,output_tokens:0};
+  review.response.upstream=structuredClone({model,answers:review.response.answers,usage:review.response.usage});
+  review.response.backend={name:provider,actual_model:model,weights_loaded:false,probabilities_calibrated:false,
+   api_calls:1,request_id_source:'host',timestamp_source:'host'};
+  state.requestVersion='kev-flow-request-v5';state.exitPolicy={...KEV_NET_HARVEST_POLICY};
+  state.entrySignalPolicy={...KEV_ENTRY_SIGNAL_POLICY};
+  Object.assign(state.candidates[0],{exitPolicyVersion:KEV_NET_HARVEST_POLICY.version,entrySignalPolicyVersion:KEV_ENTRY_SIGNAL_POLICY.version});
+  for(const value of [plan,pending]){value.exitPolicy={...KEV_NET_HARVEST_POLICY};value.entrySignalPolicy={...KEV_ENTRY_SIGNAL_POLICY};}
+  snapshot.entrySignalPolicy={...KEV_ENTRY_SIGNAL_POLICY};plan.nativeEntryGuard.version='kev-native-entry-v3';
+ }
+ const receipt=pending.entryEvidence.kevReview;
+ Object.assign(receipt,{version,provider,model,providerRevision:revision,requestId:review.requestId});
+ edit({review,plan,snapshot,pending,receipt});
+ review.snapshotSha256=receipt.snapshotSha256=digest(snapshot);
+ delete review.proofSha256;review.proofSha256=digest(review);receipt.proofSha256=review.proofSha256;
+ artifact.reviewRaw=JSON.stringify(review);artifact.snapshotRaw=JSON.stringify(snapshot);plan.entryEvidence=structuredClone(pending.entryEvidence);
+ plan.nativeEntryGuard.kevReviewSha256=createHash('sha256').update(artifact.reviewRaw).digest('hex');artifact.planRaw=JSON.stringify(plan);
+}
+
+test('prospective Jev approvals retain old Kev entries, losses, original target and truthful provider groups',()=>{
+ const input=fixture([{flow:true,net:-1},{flow:true,net:.2}]);reviewerPolicy(input);setOriginalProvider(input,1);
+ const before=JSON.stringify(input),r=buildKevLossReview(input);assert.equal(JSON.stringify(input),before);
+ assert.equal(r.evidenceComplete,true);assert.equal(r.totalEntries,2);assert.deepEqual(r.target,input.goal.target);
+ assert.equal(r.summary.netRealizedUsdt,'-0.8');assert.equal(r.summary.wins,1);assert.equal(r.summary.losses,1);
+ assert.deepEqual(r.byProvider.map(x=>[x.key,x.entries,x.netRealizedUsdt]),
+  [['codex-cli/test-model',1,'-1'],['typesafe-api/jev-1.13.0',1,'0.2']]);
+ assert.equal(r.rows[1].decisionProvider.revision,'12345678-1234-4234-9234-123456789abc');
+});
+
+test('Jev cannot count under a historical goal without additive policy or before its effective time',()=>{
+ for(const authorized of [false,true]){
+  const input=fixture([{flow:true,net:-.6}]);setOriginalProvider(input);
+  if(authorized)reviewerPolicy(input,new Date(start+60000).toISOString());
+  const r=buildKevLossReview(input);assert.equal(r.evidenceComplete,false);assert.equal(r.totalEntries,null);
+  assert.equal(r.summary.netRealizedUsdt,null);assert.equal(input.histories.demo.trades[0].profit_abs,-.6);
+ }
+ const input=fixture([{flow:true}]);setOriginalProvider(input);
+ const completed=input.journals.demo[0].entryEvidence.kevReview.completedAt;reviewerPolicy(input,completed);
+ assert.equal(buildKevLossReview(input).totalEntries,1,'original completion exactly at effectiveFrom is allowed');
+});
+
+test('rehashing a Jev record cannot legitimize forged upstream, aliases, revision or policy provenance',()=>{
+ const mutations=[
+  ({review})=>delete review.response.upstream,
+  ({review})=>review.response.upstream.model='jev-latest',
+  ({review})=>review.response.upstream.answers.entry.choice='hold',
+  ({review})=>review.response.upstream.usage.input_tokens++,
+  ({review})=>review.response.backend.cli_calls=1,
+  ({review})=>review.response.backend.request_id_source='remote',
+  ({review})=>review.response.backend.timestamp_source='remote',
+  ({review})=>review.request.model='kev-codex',
+  ({review})=>review.response.model='kev-codex',
+  ({review})=>review.actualModel='jev-latest',
+  ({review})=>review.response.answers.entry.confidence=true,
+  ({review})=>{review.response.upstream.usage.input_tokens=review.response.usage.input_tokens=0;},
+  ({review})=>{review.response.upstream.usage.output_tokens=review.response.usage.output_tokens=-1;},
+  ({review})=>delete review.providerRevision,
+  ({receipt})=>delete receipt.providerRevision,
+  ({review})=>review.request.state.decisionProvider.revision=snapshotId(700),
+  ({snapshot})=>snapshot.kevEntry.provider='codex-cli',
+  ({snapshot})=>snapshot.kevEntry.providerRevision=snapshotId(700),
+  ({plan})=>plan.nativeEntryGuard.version='kev-native-entry-v2',
+  ({pending})=>delete pending.entrySignalPolicy,
+  ({plan})=>delete plan.entrySignalPolicy,
+  ({review})=>delete review.request.state.entrySignalPolicy,
+ ];
+ for(const mutate of mutations){
+  const input=fixture([{flow:true,net:-.4}]);reviewerPolicy(input);setOriginalProvider(input,0,'typesafe-api',mutate);
+  const r=buildKevLossReview(input);assert.equal(r.evidenceComplete,false,mutate.toString());assert.equal(r.totalEntries,null);
+  assert.equal(r.summary.netRealizedUsdt,null);assert.equal(input.histories.demo.trades[0].profit_abs,-.4);
+ }
+});
+
+test('switching back to Kev retains explicit revision without requiring it on historical receipts',()=>{
+ const input=fixture([{flow:true},{flow:true}]);setOriginalProvider(input,1,'codex-cli');
+ input.goal.reviewerPolicy={version:'decision-provider-policy-v1',effectiveFrom:new Date(start+1000).toISOString(),
+  allowed:[{version:'kev-codex-entry-v1',provider:'codex-cli',model:'gpt-6-luna'}]};
+ input.amendment.goalSha256=createHash('sha256').update(JSON.stringify(input.goal)).digest('hex');
+ const r=buildKevLossReview(input);assert.equal(r.evidenceComplete,true);assert.equal(r.totalEntries,2);
+ assert.equal(r.rows[0].decisionProvider.revision,null);assert.equal(r.rows[1].decisionProvider.provider,'codex-cli');
+});
+
 test('actual long and short fill prices reconcile net without deducting spread twice',()=>{
  const input=fixture([{closeRate:100.1},{mode:'demo-futures',short:true,closeRate:99,funding:.02}]);
  const before=JSON.stringify(input),r=buildKevLossReview(input);assert.equal(JSON.stringify(input),before);
@@ -66,6 +181,13 @@ test('actual long and short fill prices reconcile net without deducting spread t
  near(r.summary.feeEquivalentUsdt,.7982);near(r.summary.fundingUsdt,.02);near(r.summary.netRealizedUsdt,1.4218);
  near(r.summary.decompositionResidualUsdt,0);assert.equal(r.summary.grossPositiveNetNegative,1);
  assert.equal(r.summary.wins,1);assert.equal(r.summary.losses,1);assert.equal(r.rows[1].side,'short');
+});
+
+test('a fee-adjusted flat close counts as a loss and remains in the win-rate denominator',()=>{
+ const input=fixture([{net:0},{net:1},{net:-1}]),r=buildKevLossReview(input);
+ assert.equal(r.summary.closedTrades,3);assert.equal(r.summary.wins,1);assert.equal(r.summary.losses,2);
+ assert.equal(r.summary.winRate,1/3);assert.equal(r.summary.profitFactor,1);
+ assert.equal(r.summary.netRealizedUsdt,'0');
 });
 
 test('original legacy receipt without config hash remains valid; raw evidence and plan are still required',()=>{
@@ -166,4 +288,45 @@ test('the entry cutoff remains fixed across midnight while later exits retain th
 test('CLI rejects mutation/output options before reading credentials or calling APIs',async()=>{
  for(const args of [['--reset'],['--output','goal.json'],['--goal'],['--goal','x','--resume']])
   await assert.rejects(main(args),/USAGE/);
+});
+
+test('original exit policy cohorts preserve combined goal membership and net including legacy losses',()=>{
+ const input=fixture([{flow:true,net:-.7},{flow:true,net:.3},{net:-.2}]);
+ input.goal.target={scope:'each',count:100,totalCount:200};
+ input.amendment.goalSha256=createHash('sha256').update(JSON.stringify(input.goal)).digest('hex');
+ const before=buildKevLossReview(input);setOriginalPolicy(input,1);const original=JSON.stringify(input),r=buildKevLossReview(input);
+ assert.equal(JSON.stringify(input),original);assert.equal(r.totalEntries,before.totalEntries);assert.deepEqual(r.summary,before.summary);
+ assert.deepEqual(r.target,before.target);assert.equal(r.summary.netRealizedUsdt,'-0.6');assert.equal(r.summary.losses,2);
+ assert.deepEqual(r.rows.map(row=>row.exitPolicyVersion),['kev-flow-fixed-exits-v1','kev-net-harvest-v1',null]);
+ assert.equal(r.byExitPolicy.find(g=>g.key==='kev-flow-fixed-exits-v1').netRealizedUsdt,'-0.7');
+ assert.equal(r.byExitPolicy.find(g=>g.key==='kev-net-harvest-v1').netRealizedUsdt,'0.3');
+ assert.equal(r.byExitPolicy.find(g=>g.key===null).netRealizedUsdt,'-0.2');
+ assert.deepEqual(r.modes.demo.byExitPolicy,r.byExitPolicy);assert.deepEqual(r.modes['demo-futures'].byExitPolicy,[]);
+ assert.match(r.accounting.exitPolicy,/not causal evidence/);
+});
+
+test('new policy must match the original state, selected candidate, plan and pending even after rehashing',()=>{
+ const mutations=[
+  ({plan})=>delete plan.exitPolicy,({pending})=>delete pending.exitPolicy,({review})=>delete review.request.state.exitPolicy,
+  ({review})=>delete review.request.state.candidates[0].exitPolicyVersion,
+  ({review})=>review.request.state.candidates[0].exitPolicyVersion='kev-flow-fixed-exits-v1',
+  ({review})=>review.request.state.requestVersion='kev-flow-request-v3',
+  ({plan})=>plan.exitPolicy.exitSlippageBps='0',({pending})=>pending.exitPolicy.middleNetUsdt='2',
+  ({review})=>review.request.state.exitPolicy.lateNetBps='0',
+  ({plan})=>plan.exitPolicy.extra='ignored',({plan})=>plan.entryPolicyVersion='other',
+  ({plan,pending,review})=>{delete plan.exitPolicy;delete pending.exitPolicy;delete review.request.state.exitPolicy;delete review.request.state.candidates[0].exitPolicyVersion;}
+ ];
+ for(const edit of mutations){
+  const input=fixture([{flow:true,net:-.7}]);setOriginalPolicy(input,0,edit);const r=buildKevLossReview(input);
+  assert.equal(r.evidenceComplete,false);assert.equal(r.totalEntries,null);assert.equal(r.rows[0].exitPolicyVersion,null);
+  assert.equal(r.rows[0].netUsdt,'-0.7','a policy mismatch never erases an original loss');
+  assert.equal(r.rows[0].kevApprovalVerified,false);assert.ok(r.warnings.some(w=>w.code==='ORIGINAL_KEV_APPROVAL_INVALID'));
+ }
+});
+
+test('legacy reviews stay valid without latest request fields and missing evidence is not relabeled',()=>{
+ const old=fixture([{flow:true}]),pending=old.journals.demo[0],artifact=old.artifacts.demo[pending.id];
+ const legacy=buildKevLossReview(old);assert.equal(legacy.evidenceComplete,true);assert.equal(legacy.rows[0].exitPolicyVersion,'kev-flow-fixed-exits-v1');
+ const nonFlow=fixture();assert.equal(buildKevLossReview(nonFlow).rows[0].exitPolicyVersion,null);
+ delete artifact.planRaw;const missing=buildKevLossReview(old);assert.equal(missing.rows[0].exitPolicyVersion,null);assert.equal(missing.evidenceComplete,false);
 });

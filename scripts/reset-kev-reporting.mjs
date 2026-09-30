@@ -11,6 +11,8 @@ import {readJson,writeJson,exists,journalRead} from '../src/io.mjs';
 import {loadPolicy} from '../src/config.mjs';
 import {FreqtradeClient} from '../src/freqtrade.mjs';
 import {buildSprintReview} from './trade-sprint-review.mjs';
+import {assertFreshResetReview,assertResetHistoryPreserved} from '../src/reporting-reset.mjs';
+import {KEV_FLOW_REQUEST_VERSION} from '../src/kev-entry.mjs';
 
 const MODES=['demo','demo-futures'];
 // Keep each reporting reset auditable.  The default preserves the original
@@ -18,9 +20,10 @@ const MODES=['demo','demo-futures'];
 // same day without overwriting the first reset's maintenance/commit evidence.
 const root=ROOT, resetDirName=process.env.KEV_RESET_DIR??'kev-reset-2026-09-22', dir=join(root,'local',resetDirName),
  resetScope=process.env.KEV_RESET_SCOPE??'combined', resetCount=Number(process.env.KEV_RESET_COUNT??100),
- allowOpenBaseline=process.env.KEV_ALLOW_OPEN_BASELINE==='true';
+ resetWindowHours=Number(process.env.KEV_RESET_WINDOW_HOURS??24),allowOpenBaseline=process.env.KEV_ALLOW_OPEN_BASELINE==='true';
 assert.ok(['combined','each'].includes(resetScope),'RESET_SCOPE_INVALID');
 assert.ok(Number.isSafeInteger(resetCount)&&resetCount>0,'RESET_COUNT_INVALID');
+assert.ok(Number.isSafeInteger(resetWindowHours)&&resetWindowHours>=1&&resetWindowHours<=720,'RESET_WINDOW_HOURS_INVALID');
 const maintenancePath=join(dir,'maintenance.json');
 const modeStop=mode=>join(root,'local',mode,'STOP');
 const supervisorStop=join(root,'local','supervisor','STOP');
@@ -55,8 +58,11 @@ async function loadFacts(){
   const latest=new Map();
   for(const row of journal)latest.set(row.id,row);
   assert.equal([...latest.values()].some(row=>['pending','unknown'].includes(row.status)),false,`UNRESOLVED_ORDER:${mode}`);
-  const realized=history.reduce((sum,t)=>{
-   try{return sum.plus(new Decimal(t.profit_abs??0));}catch{return sum;}
+  const realized=history.filter(t=>!t.is_open).reduce((sum,t)=>{
+   assert.ok(t.profit_abs!==null&&t.profit_abs!==undefined,`RESET_PNL_MISSING:${mode}:${t.trade_id}`);
+   const pnl=new Decimal(t.profit_abs);
+   assert.ok(pnl.isFinite(),`RESET_PNL_INVALID:${mode}:${t.trade_id}`);
+   return sum.plus(pnl);
   },new Decimal(0));
   histories[mode]={source:'freqtrade-demo',historyComplete:true,trades:history,observedAt:nowIso()};
   journals[mode]=journal;
@@ -121,12 +127,18 @@ async function commit(){
  assert.equal(kevRuntime.authenticated,true,'KEV_NOT_AUTHENTICATED');
  assert.equal(kevRuntime.busy,false,'KEV_RUNTIME_BUSY');
  const at=nowIso(),facts=await loadFacts(),observedAt=nowIso(),sessionId=randomUUID();
+ assert.deepEqual(await readJson(join(root,'local','demo-session.json')),maintenance.executionSession,'RESET_EXECUTION_SESSION_CHANGED');
+ assert.deepEqual(await readJson(join(root,'local','trade-goals','active.json')),maintenance.previousActive,'RESET_ACTIVE_GOAL_CHANGED');
+ assert.deepEqual(await readJson(resolve(root,maintenance.previousActive.goalPath)),maintenance.previousGoal,'RESET_PREVIOUS_GOAL_CHANGED');
+ assertResetHistoryPreserved(maintenance.oldHistory,facts.histories);
  for(const mode of MODES)facts.histories[mode].observedAt=observedAt;
- const stamp=at.replace(/[-:TZ.]/g,'').slice(0,14),goalId=`kev-demo-100-reset-${stamp}`;
- const goalPath=`local/trade-goals/${goalId}/goal.json`,deadline=new Date(Date.parse(at)+86400000).toISOString();
+ const totalTargetCount=resetScope==='each'?resetCount*MODES.length:resetCount;
+ const stamp=at.replace(/[-:TZ.]/g,'').slice(0,14),goalId=`kev-demo-${totalTargetCount}-${resetScope}-reset-${stamp}`;
+ const goalPath=`local/trade-goals/${goalId}/goal.json`,deadline=new Date(Date.parse(at)+resetWindowHours*3600000).toISOString();
  const goal={schemaVersion:2,id:goalId,source:'freqtrade-demo',sessionId,startedAt:at,deadline,
   timezone:'Asia/Taipei',ruleVersion:'kev-order-flow-v1',entryPolicyVersion:'kev-order-flow-v1',modelFingerprint:null,
-  target:{scope:resetScope,count:resetCount},
+  target:{scope:resetScope,count:resetCount,totalCount:totalTargetCount},exitPolicyVersion:'kev-flow-fixed-exits-v1',
+  requestedExitPolicyVersion:'kev-staged-net-targets-v1',exitPolicyGate:{status:'not-promoted',reason:'The 84-trade historical set has no timestamped executable quote path to replay staged take-profit fills; current exits remain active until a valid replay shows improvement.'},
   modes:Object.fromEntries(MODES.map(mode=>[mode,{excludedTradeIds:facts.modeFacts[mode].excludedTradeIds,
    baselineTradeCount:facts.modeFacts[mode].excludedTradeIds.length}])),
   reset:{type:'reporting-scope-reset',requestedAt:at,archive:`local/trade-goals/${goalId}/pre-reset.json`,
@@ -134,33 +146,36 @@ async function commit(){
    countDefinition:'Actual Kev-approved strategy entry fills after startedAt; one mode/trade_id counts once.',
    openBaselineAllowed:allowOpenBaseline,openBaselineExcluded:Object.fromEntries(MODES.map(mode=>[mode,facts.modeFacts[mode].openCount])),
    executionSessionId:maintenance.executionSession.id,executionSessionPreserved:true,
-   deadlinePolicy:'New 24-hour observation window; previous goal, history and execution session are unchanged.'},
+   deadlinePolicy:`New ${resetWindowHours}-hour observation window; previous goal, history and execution session are unchanged.`},
   kevEntry:{required:true,version:'kev-codex-entry-v1',provider:'codex-cli',model:kevRuntime.actual_model,
-   reasoningEffort:kevRuntime.reasoning_effort,
+   reasoningEffort:kevRuntime.reasoning_effort,decisionStyle:'balanced',decisionStyleVersion:'kev-balanced-selection-v1',
+   requestVersion:KEV_FLOW_REQUEST_VERSION,
    activatedAt:at,countDefinition:'A real Kev-approved strategy entry fill after startedAt; one mode/trade_id counts once.'}};
+ if(maintenance.previousGoal.reviewerPolicy)goal.reviewerPolicy={...maintenance.previousGoal.reviewerPolicy,effectiveFrom:at};
  const goalDir=join(root,'local','trade-goals',goalId);
+ const initial=assertFreshResetReview(buildSprintReview({goal,histories:facts.histories,journals:facts.journals,observedAt,amendment:null}));
+ const active={sessionId,goalId,goalPath,target:goal.target};
  await writeJson(join(goalDir,'pre-reset.json'),{createdAt:at,previousActive:maintenance.previousActive,
   previousGoal:maintenance.previousGoal,executionSession:maintenance.executionSession,modeFacts:facts.modeFacts,
   history:Object.fromEntries(MODES.map(mode=>[mode,facts.histories[mode].trades.map(compact)])),
   preservation:'Raw exchange/journal/evidence files remain at their original paths; this is a reporting-scope archive.'});
  await writeJson(join(goalDir,'goal.json'),goal);
  await writeJson(join(goalDir,'session.json'),{schemaVersion:1,id:sessionId,startedAt:at,modes:MODES});
- await writeJson(join(root,'local','trade-goals','active.json'),{sessionId,goalId,goalPath});
- const initial=buildSprintReview({goal,histories:facts.histories,journals:facts.journals,observedAt,amendment:null});
  await writeJson(join(goalDir,'initial-review.json'),initial);
  const remaining=resetScope==='each'?Object.fromEntries(MODES.map(mode=>[mode,resetCount-(initial.modes[mode].entries??0)])):resetCount-(initial.totalEntries??0);
  const verification={schemaVersion:1,complete:true,verifiedAt:nowIso(),timeZone:'Asia/Taipei',goalId,goalPath,
-  startedAt:at,deadline,target:{scope:resetScope,count:resetCount},initialCount:initial.totalEntries,currentCount:initial.totalEntries,
+  startedAt:at,deadline,target:{scope:resetScope,count:resetCount,totalCount:totalTargetCount},initialCount:initial.totalEntries,currentCount:initial.totalEntries,
   remaining,currentByMode:Object.fromEntries(MODES.map(mode=>[mode,initial.modes[mode].entries])),
   realizedUsdt:'0',floatingUsdt:'0',positionsPreserved:true,historyPreserved:true,executionSessionPreserved:true,
   ordersSubmittedByReset:0,previousGoalId:maintenance.previousActive.goalId,previousGoalPreserved:true,servicesRestarted:false};
  await writeJson(join(goalDir,'reset-verification.json'),verification);
+ await writeJson(join(root,'local','trade-goals','active.json'),active);
  for(const path of stopPaths){
   if(Object.hasOwn(maintenance.preexistingStops??{},path))continue;
   assert.equal(await readFile(path,'utf8'),maintenance.marker);
   await import('node:fs/promises').then(fs=>fs.unlink(path));
  }
- await writeJson(join(dir,'commit.json'),{committedAt:nowIso(),goal,verification,active:{sessionId,goalId,goalPath},
+ await writeJson(join(dir,'commit.json'),{committedAt:nowIso(),goal,verification,active,
   historyPreserved:true,executionSessionPreserved:true,ordersSubmittedByReset:0});
   console.log(JSON.stringify({reset:true,goal:{id:goalId,path:goalPath,target:goal.target,startedAt:at,deadline},
   initialCount:initial.totalEntries,historyPreserved:true,executionSessionPreserved:true,servicesRestarted:false},null,2));
@@ -178,13 +193,15 @@ async function repairInitialReview(){
   await waitForDrain();
   const facts=await loadFacts(),observedAt=nowIso();
   for(const mode of MODES)facts.histories[mode].observedAt=observedAt;
-  const initial=buildSprintReview({goal,histories:facts.histories,journals:facts.journals,observedAt,amendment:null});
-  assert.equal(initial.evidenceComplete,true,'REPAIRED_INITIAL_EVIDENCE_INCOMPLETE');
+  const initial=assertFreshResetReview(buildSprintReview({goal,histories:facts.histories,journals:facts.journals,observedAt,amendment:null}));
   const goalDir=dirname(resolve(root,active.goalPath));
   await writeJson(join(goalDir,'initial-review.json'),initial);
   const previous=await readJson(join(goalDir,'reset-verification.json'));
+  const remaining=goal.target.scope==='each'
+   ?Object.fromEntries(MODES.map(mode=>[mode,goal.target.count-(initial.modes[mode].entries??0)]))
+   :goal.target.count-(initial.totalEntries??0);
   const verification={...previous,verifiedAt:nowIso(),initialCount:initial.totalEntries,
-   currentCount:initial.totalEntries,remaining:100-(initial.totalEntries??0),
+   currentCount:initial.totalEntries,remaining,
    currentByMode:Object.fromEntries(MODES.map(mode=>[mode,initial.modes[mode].entries])),
    realizedUsdt:'0',floatingUsdt:'0',historyPreserved:true,executionSessionPreserved:true,
    ordersSubmittedByReset:0,servicesRestarted:false};

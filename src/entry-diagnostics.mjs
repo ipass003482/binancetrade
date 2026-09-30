@@ -1,5 +1,5 @@
 import { readdir,stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join,resolve } from 'node:path';
 import { readJson } from './io.mjs';
 import { isEntry } from './mode.mjs';
 
@@ -107,41 +107,80 @@ export function buildEntryDiagnostics({mode,ruleVersion,runs,allowance=null,asOf
   latest,allowance,exclusions,warnings};
 }
 
-// Keep a compact file index so a 30-second UI refresh does not reread every
-// historical OHLCV file. Selection always uses snapshot.createdAt, not mtime.
-const snapshotIndex=new Map();
-async function indexedSnapshot(file){
- const info=await stat(file),key=info.mtimeMs+':'+info.size,old=snapshotIndex.get(file);
- if(old?.key===key)return old.value;
- const value=await readJson(file),compact={id:value.id,mode:value.mode,createdAt:value.createdAt,
-  purpose:value.purpose,ruleVersion:value.ruleVersion,
-  markets:Array.isArray(value.markets)?value.markets.map(m=>({pair:m.pair,entryCost:m.entryCost})):[]};
- if(snapshotIndex.size>=4096)snapshotIndex.delete(snapshotIndex.keys().next().value);
- snapshotIndex.set(file,{key,value:compact});return compact;
-}
-export async function readEntryDiagnostics(local,{mode,ruleVersion,allowance=null,now=Date.now(),since=null}={}){
- const dir=join(local,'runs');let names;
- try{names=(await readdir(dir)).filter(name=>name.endsWith('.snapshot.json'));}
- catch(error){if(error.code!=='ENOENT')throw error;names=[];}
- const runs=[],warnings=[];
- for(let offset=0;offset<names.length;offset+=16){
-  const results=await Promise.allSettled(names.slice(offset,offset+16).map(async name=>{
-   const snapshot=await indexedSnapshot(join(dir,name)),time=Date.parse(snapshot.createdAt);
-   if(!Number.isFinite(time)||time<Math.max(now-WINDOW_MS,since===null?0:Date.parse(since))||time>now||snapshot.mode!==mode||snapshot.purpose==='execution_probe')return {snapshot};
-   const base=name.slice(0,-'.snapshot.json'.length);
-   const values=await Promise.allSettled(['rules','outcome'].map(suffix=>readJson(join(dir,base+'.'+suffix+'.json'))));
-   const run={snapshot};
-   for(let i=0;i<values.length;i++){
-    if(values[i].status==='fulfilled')run[i===0?'rules':'outcome']=values[i].value;
-    else if(values[i].reason.code!=='ENOENT')warnings.push({code:'DIAGNOSTICS_FILE_UNREADABLE',file:base+'.'+(i===0?'rules':'outcome')+'.json'});
-   }
-   return run;
-  }));
-  for(const result of results){
-   if(result.status==='fulfilled')runs.push(result.value);
-   else warnings.push({code:'DIAGNOSTICS_SNAPSHOT_UNREADABLE'});
-  }
+// Retain only compact metadata for the actual directory inventory. A FIFO
+// smaller than the history rereads every full snapshot on every sweep.
+// mtime/size invalidate cached bytes; selection still uses snapshot.createdAt.
+export function createEntryDiagnosticsReader({readDirectory=readdir,fileStat=stat,readDocument=readJson,clock=Date.now}={}){
+ const directories=new Map(),scopes=new Map();
+ async function indexedSnapshot(index,file){
+  const info=await fileStat(file),key=info.mtimeMs+':'+info.size,old=index.get(file);
+  if(old?.key===key)return old.pending??old.value;
+  const entry={key};index.set(file,entry);
+  entry.pending=readDocument(file).then(value=>{
+   const compact={id:value.id,mode:value.mode,createdAt:value.createdAt,purpose:value.purpose,ruleVersion:value.ruleVersion,
+    markets:Array.isArray(value.markets)?value.markets.map(m=>({pair:m?.pair,entryCost:cost(m?.entryCost)})):[]};
+   entry.value=compact;delete entry.pending;return compact;
+  },error=>{if(index.get(file)===entry)index.delete(file);throw error;});
+  return entry.pending;
  }
- const report=buildEntryDiagnostics({mode,ruleVersion,runs,allowance,asOf:now,since});
- report.warnings.push(...warnings);return report;
+ async function scan(local,{mode,ruleVersion,now,since}){
+  const dir=join(local,'runs');let names;
+  try{names=(await readDirectory(dir)).filter(name=>name.endsWith('.snapshot.json'));}
+  catch(error){if(error.code!=='ENOENT')throw error;names=[];}
+  const index=directories.get(dir)??new Map();directories.set(dir,index);
+  const inventory=new Set(names.map(name=>join(dir,name)));
+  for(const file of index.keys())if(!inventory.has(file))index.delete(file);
+  const runs=[],warnings=[];
+  for(let offset=0;offset<names.length;offset+=16){
+   const results=await Promise.allSettled(names.slice(offset,offset+16).map(async name=>{
+    const snapshot=await indexedSnapshot(index,join(dir,name)),time=Date.parse(snapshot.createdAt);
+    if(!Number.isFinite(time)||time<Math.max(now-WINDOW_MS,since===null?0:Date.parse(since))||time>now||snapshot.mode!==mode||snapshot.purpose==='execution_probe')return {snapshot};
+    const base=name.slice(0,-'.snapshot.json'.length);
+    const values=await Promise.allSettled(['rules','outcome'].map(suffix=>readDocument(join(dir,base+'.'+suffix+'.json'))));
+    const run={snapshot};
+    for(let i=0;i<values.length;i++){
+     if(values[i].status==='fulfilled')run[i===0?'rules':'outcome']=values[i].value;
+     else if(values[i].reason.code!=='ENOENT')warnings.push({code:'DIAGNOSTICS_FILE_UNREADABLE',file:base+'.'+(i===0?'rules':'outcome')+'.json'});
+    }
+    return run;
+   }));
+   for(const result of results){
+    if(result.status==='fulfilled')runs.push(result.value);
+    else warnings.push({code:'DIAGNOSTICS_SNAPSHOT_UNREADABLE'});
+   }
+  }
+  const report=buildEntryDiagnostics({mode,ruleVersion,runs,asOf:now,since});
+  report.warnings.push(...warnings);return report;
+ }
+ return async function readDiagnostics(local,{mode,ruleVersion,allowance=null,now=Date.now(),since=null,refreshMs=30000,waitMs=Infinity}={}){
+  // Reject an invalid scope before starting any background reads.
+  buildEntryDiagnostics({mode,ruleVersion,runs:[],asOf:now,since});
+  if(!Number.isFinite(refreshMs)||refreshMs<0||!(waitMs===Infinity||Number.isFinite(waitMs)&&waitMs>=0))throw Error('ENTRY_DIAGNOSTICS_INPUT_INVALID');
+  local=resolve(local);since=since===null?null:new Date(since).toISOString();
+  const key=JSON.stringify([local,mode,ruleVersion,since]),state=scopes.get(key)??{};
+  scopes.set(key,state);
+  const observed=typeof now==='number'?now:Date.parse(now),cachedAge=clock()-state.settledAt;
+  if(state.pending&&observed<state.asOf)throw Error('ENTRY_DIAGNOSTICS_OBSERVATION_TIME_REVERSED');
+  if(!state.pending&&!(cachedAge>=0&&cachedAge<refreshMs&&observed>=state.asOf)){
+   state.asOf=observed;
+   // Both settlement handlers consume rejection, including when the bounded
+   // caller has already returned. No detached rejecting background promise.
+   state.pending=scan(local,{mode,ruleVersion,now:observed,since}).then(report=>{
+    state.report=report;state.error=null;
+   },error=>{state.report=null;state.error=error;}).then(()=>{state.settledAt=clock();state.pending=null;});
+  }
+  if(state.pending){
+   let timer;
+   try{
+    if(waitMs===Infinity)await state.pending;
+    else await Promise.race([state.pending,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('DIAGNOSTICS_INDEX_WARMING')),waitMs);})]);
+   }finally{clearTimeout(timer);}
+  }
+  if(state.error)throw state.error;
+  if(Date.parse(state.report?.asOf)>observed)throw Error('ENTRY_DIAGNOSTICS_OBSERVATION_TIME_REVERSED');
+  // A completed scan keeps its original observation time, even on a later UI
+  // refresh. Never stamp cached diagnostics with current account freshness.
+  return {...structuredClone(state.report),allowance};
+ };
 }
+export const readEntryDiagnostics=createEntryDiagnosticsReader();

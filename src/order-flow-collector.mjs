@@ -2,8 +2,9 @@ import {join} from 'node:path';
 import {ROOT} from './paths.mjs';
 import {readJson,writeJson,exists} from './io.mjs';
 import {jsonFetch} from './http.mjs';
-import {FLOW_VERSION,assessOrderFlow} from './order-flow.mjs';
+import {FLOW_VERSION,assessOrderFlow,validateOrderFlowData} from './order-flow.mjs';
 import {createSpotFlowStore} from './spot-flow-store.mjs';
+import {createQuotePathArchive} from './quote-path-archive.mjs';
 export const FLOW_COLLECTOR_VERSION='per-pair-clock-v2';
 export const nextFlowSampleDelay=(elapsed,rateLimited=false)=>rateLimited?60000:Math.max(5000,10000-Math.max(0,elapsed));
 export async function sampleOrderFlow(policy,previous={}, {fetchImpl=fetch,now=()=>Date.now()}={}){
@@ -12,7 +13,8 @@ export async function sampleOrderFlow(policy,previous={}, {fetchImpl=fetch,now=(
  const prefix=mode==='demo'?'/api/v3':'/fapi/v1',started=now();
  const clock=await jsonFetch(base+prefix+'/time',{fetchImpl,timeoutMs:3000});
  const received=now();if(!Number.isSafeInteger(started)||!Number.isSafeInteger(received)||received<started||!Number.isSafeInteger(clock.serverTime)||received-started>1500||Math.abs(clock.serverTime-received)>2000)throw Error('FLOW_CLOCK');
- const result={version:FLOW_VERSION,collectorVersion:FLOW_COLLECTOR_VERSION,mode,observedAt:received,pid:process.pid,markets:{},diagnostics:{}};
+ const result={version:FLOW_VERSION,collectorVersion:FLOW_COLLECTOR_VERSION,mode,observedAt:received,pid:process.pid,
+  clock:{mode,source:base+prefix+'/time',requestStartedAt:started,receivedAt:received,serverTime:clock.serverTime},markets:{},diagnostics:{}};
  let cursor=0;
  await Promise.all(Array.from({length:Math.min(3,policy.pairs.length)},async()=>{
   while(cursor<policy.pairs.length){const pair=policy.pairs[cursor++];
@@ -31,7 +33,15 @@ export async function sampleOrderFlow(policy,previous={}, {fetchImpl=fetch,now=(
     const books=[...(old?.books??[]),{at,requestAt:dispatched,updateId:book.lastUpdateId,bids:book.bids,asks:book.asks}].filter(b=>completed-b.at<=60000).slice(-3);
     const proof={version:FLOW_VERSION,mode,pair,source:base,books,startTime,endTime,trades:Array.isArray(trades)?trades.map(({a,p,q,T,m})=>({a,p,q,T,m})):null};
     result.markets[pair]=proof;
-    result.diagnostics[pair]={...assessOrderFlow(proof,{mode,pair,long:true,now:completed}),collection:{dispatchedAt:dispatched,depthReceivedAt:at,completedAt:completed,depthRequestMs:at-dispatched,bookMinusTapeMs:at-endTime,tradeCount:proof.trades?.length??null,saturated:proof.trades?.length===1000}};
+    const dataValidity=validateOrderFlowData(proof,{mode,pair,now:completed});
+    // Preserve the historical top-level long-side diagnostic for readers that
+    // already use it. Futures also reports the short side, while dataValidity
+    // states whether the raw sample itself is usable regardless of direction.
+    const longDiagnostic=assessOrderFlow(proof,{mode,pair,long:true,now:completed});
+    const directionDiagnostics={long:longDiagnostic};
+    if(mode==='demo-futures')directionDiagnostics.short=assessOrderFlow(proof,{mode,pair,long:false,now:completed});
+    result.diagnostics[pair]={...longDiagnostic,dataValidity,directionDiagnostics,
+     collection:{dispatchedAt:dispatched,depthReceivedAt:at,completedAt:completed,depthRequestMs:at-dispatched,bookMinusTapeMs:at-endTime,tradeCount:proof.trades?.length??null,saturated:proof.trades?.length===1000}};
    }catch(error){result.diagnostics[pair]={status:'unavailable',reason:/^HTTP_(429|418)$/.test(error.message)?'FLOW_RATE_LIMIT':'FLOW_FETCH_FAILED'};}
   }
  }));
@@ -39,17 +49,37 @@ export async function sampleOrderFlow(policy,previous={}, {fetchImpl=fetch,now=(
  return result;
 }
 export async function readOrderFlow(mode,pair){
- try{return (await readJson(join(ROOT,'local',mode,'order-flow.json'))).markets?.[pair]??null;}catch{return null;}
+ return (await readOrderFlowSample(mode))?.markets?.[pair]??null;
+}
+// One atomic publication is one observation generation. Callers collecting a
+// complete decision must capture it once, after their slower quote/info reads.
+// A failed publication remains unavailable; never fall back to cached proofs.
+export async function readOrderFlowSample(mode){
+ try{
+  const sample=await readJson(join(ROOT,'local',mode,'order-flow.json'));
+  return sample?.mode===mode&&sample.version===FLOW_VERSION&&!sample.error?sample:null;
+ }catch{return null;}
 }
 export function startOrderFlowSampler(policy,local,{sampleRound=sampleOrderFlow,publish=writeJson,hasStop=exists,
  now=()=>Date.now(),schedule=setTimeout,unschedule=clearTimeout,
- observe=policy.mode==='demo'?createSpotFlowStore(local):null}={}){
+ observe=policy.mode==='demo'?createSpotFlowStore(local):null,
+ archive=createQuotePathArchive(local,{mode:policy.mode,pairs:policy.pairs})}={}){
  let stopped=false,timer=null,pending=Promise.resolve(),previous={},observerPending=null,observerSkippedBusy=0;
  const tick=async()=>{
   if(stopped||await hasStop(join(local,'STOP')))return;
   const tickStarted=now();let rateLimited=false,visible;
   try{const sampled=await sampleRound(policy,previous);sampled.research={usedForEntries:false,skippedBusySamples:observerSkippedBusy};await publish(join(local,'order-flow.json'),sampled);
-   previous=sampled;visible=sampled;
+   // A failed pair is unavailable in the published round, but must not erase
+   // still-valid raw books inside the collector. Recovery always fetches new
+   // tape/depth and re-runs the unchanged age/gap/update-ID checks. Keep books
+   // only (never an old tape/proof), bounded to the same 60-second horizon.
+   const retained={},cacheNow=now();
+   for(const pair of policy.pairs){
+    const proof=sampled.markets?.[pair]??(previous.mode===policy.mode?previous.markets?.[pair]:null);
+    const books=(proof?.books??[]).filter(book=>Number.isSafeInteger(book.at)&&cacheNow>=book.at&&cacheNow-book.at<=60000).slice(-3);
+    if(books.length)retained[pair]={books};
+   }
+   previous={mode:policy.mode,markets:retained};visible=sampled;
    if(Object.values(sampled.diagnostics).some(d=>d.reason==='FLOW_RATE_LIMIT'))rateLimited=true;
   }catch(error){
    const code=typeof error?.message==='string'?error.message:'';
@@ -61,6 +91,9 @@ export function startOrderFlowSampler(policy,local,{sampleRound=sampleOrderFlow,
     failureReason:/^(FLOW_CLOCK|HTTP_\d{3}|INVALID_JSON_RESPONSE|RESPONSE_TOO_LARGE|UPSTREAM_ERROR)$/.test(code)?code:'FLOW_FETCH_OR_PUBLISH_FAILED'};
    try{await publish(join(local,'order-flow.json'),visible);}catch{}
   }
+  // The quote recorder owns a separate one-in-flight queue. A slow/failed
+  // research writer cannot delay collection or erase the entry observation.
+  if(archive){try{archive(visible??{mode:policy.mode,markets:{}});}catch{}}
   // Observer failures are visible but never add an entry gate or erase valid flow.
   if(observe){
    if(observerPending)observerSkippedBusy++;
@@ -71,5 +104,5 @@ export function startOrderFlowSampler(policy,local,{sampleRound=sampleOrderFlow,
   }
   if(!stopped)timer=schedule(()=>{pending=tick();},nextFlowSampleDelay(now()-tickStarted,rateLimited));
  };
- pending=tick();return async()=>{stopped=true;unschedule(timer);await pending;if(observerPending)await observerPending;};
+ pending=tick();return async()=>{stopped=true;unschedule(timer);await pending;if(observerPending)await observerPending;if(archive?.close)await archive.close();};
 }
